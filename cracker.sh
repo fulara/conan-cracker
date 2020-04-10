@@ -86,6 +86,6 @@ source $pkg_dir/activate_run.sh
 source $pkg_dir/activate.sh
 $what "\${@}"
 EOT
+  chmod +x $location
   echo "$what" >> $pkg_index
 done
-  chmod +x $location
