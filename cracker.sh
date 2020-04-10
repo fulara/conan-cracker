@@ -59,7 +59,7 @@ if [[ -d $pkg_dir ]]; then
   fi
 fi 
 
-conan install $conan_package -g virtualenv -g virtualrunenv -if $pkg_dir &>/dev/null || ( echo "Failed to install $conan_package_name" && exit 3 )
+conan install $conan_package -g virtualenv -g virtualrunenv -if $pkg_dir &>/dev/null || ( echo "Failed to install $conan_package_name" ; exit 3 )
 
 while test ${#} -gt 0
 do
