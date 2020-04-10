@@ -41,7 +41,7 @@ conan search $conan_package &> /dev/null  || ( echo "Package $conan_package not 
 shift
 
 conan_package_name=$(echo "$conan_package" | cut -d'/' -f 1)
-pkg_dir=${CRACKER_CACHE_DIR}/$conan_package_name
+pkg_dir=${CRACKER_CACHE_DIR}/.$conan_package_name
 pkg_index=$pkg_dir/.cracker_index
 
 if [[ -d $pkg_dir ]]; then
