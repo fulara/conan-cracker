@@ -1,5 +1,10 @@
 #!/bin/bash
 
+#todo:
+#1. implement --enable-rh-check
+#2. cleanup usage.
+#3. ?
+
 function error_exit { echo -e "\e[31m${@}" 1>&2; exit 1; }
 function warn { echo -e "\e[33m${@}"; }
 function info { echo -e "\e[32m${@}"; }
@@ -39,10 +44,11 @@ function init_cache {
   else
     CRACKER_CACHE_DIR=${CRACKER_CACHE_DIR}/.cracker_cache
   fi
-  
+
   CRACKER_CACHE_DIR=${CRACKER_CACHE_DIR:-~/.cracker_cache}
-  
+
   mkdir -p $CRACKER_CACHE_DIR
+  mkdir -p $CRACKER_CACHE_DIR/.cracker_storage
 }
 
 #positional args
@@ -51,12 +57,12 @@ args=()
 
 # named args
 while [ "$1" != "" ]; do
-    case "$1" in
-        -r | --enable-rh-check )      RH_CHECK=yes;;
-        -s | --some_more_args )       some_more_args="$2";     shift;;
-        -y | --yet_more_args )        yet_more_args="$2";      shift;;
-        -h | --help )                 usage;                   exit;; # quit and show usage
-        * )                           args+=("$1")             # if no match, add it to the positional args
+  case "$1" in
+    -r | --enable-rh-check )      RH_CHECK=yes;;
+    -s | --some_more_args )       some_more_args="$2";     shift;;
+    -y | --yet_more_args )        yet_more_args="$2";      shift;;
+    -h | --help )                 usage;                   exit;; # quit and show usage
+    * )                           args+=("$1")             # if no match, add it to the positional args
     esac
     shift # move to next kv pair
 done
@@ -78,7 +84,12 @@ if [[ ! "$conan_package" = *"@"* ]]; then
   conan_package=${conan_package}@
 fi
 
-conan search $conan_package &> /dev/null  || error_exit "Package $conan_package not found in cache."
+if [[ ${#conan_package} -le 5 ]]; then
+  error_exit "conan package ${conan_package} provided shorter than 5 characters.. conan does not handle that!"
+fi
+
+conan search $conan_package -r=all &> /dev/null  || error_exit "Package $conan_package not found in cache."
+echo "conan search $conan_package &> /dev/null "
 shift
 
 conan_package_name=$(echo "$conan_package" | cut -d'/' -f 1)
@@ -100,7 +111,14 @@ if [[ -d $pkg_dir ]]; then
   fi
 fi 
 
-conan install $conan_package -g virtualenv -g virtualrunenv -if $pkg_dir &>/dev/null || error_exit "Failed to install $conan_package_name"
+previous_storage_path=$(conan config get storage.path)
+conan config set storage.path=${CRACKER_CACHE_DIR}/.cracker_storage
+conan install ${conan_package} -g virtualenv -g virtualrunenv -if $pkg_dir 2>&1 || {
+  conan config set storage.path=${previous_storage_path}
+  echo $output
+  error_exit "Failed to install $conan_package_name"
+}
+conan config set storage.path=${previous_storage_path} || error_exit "Unable to revert your storage path to previous value, your conan installation is now corrupted, previous path was: $previous_storage_path"
 
 while test ${#} -gt 0
 do
@@ -110,7 +128,7 @@ do
   if [ -f $location ] ; then
     if ask_user "Location $location is already occupied" "overwrite with $what from $conan_package_name?"; then
       info "overriding $what."
-      warn "this will not remove the mention of that package from its creator index! may result in unexpected issues." 
+      warn "this will not remove the mention of that package from its creator index! may result in unexpected issues."
       rm $location
     else
       continue
