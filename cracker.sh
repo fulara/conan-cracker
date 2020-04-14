@@ -20,6 +20,17 @@ EOF
   fi
 }
 
+function rh6_check {
+  if [ -f /etc/redhat-release ]; then
+    major_v=$(cat /etc/redhat-release | sed -r 's@.*release ([0-9])+\..*@\1@g')
+    if [[ "$major_v" != 6 ]]; then
+      error_exit "you are not on rh6! if you want to have a single .cracker_storage consider using this on rh6."
+    fi
+  else
+    error_exit "you are not on rh/centos. disable this option!"
+  fi
+}
+
 function ask_user {
   while true; do
     read -p "$1 Do you wish to $2 Yn " yn
@@ -58,7 +69,7 @@ args=()
 # named args
 while [ "$1" != "" ]; do
   case "$1" in
-    -r | --enable-rh-check )      RH_CHECK=yes;;
+    -r | --enable-rh-check )      rh6_check;;
     -s | --some_more_args )       some_more_args="$2";     shift;;
     -y | --yet_more_args )        yet_more_args="$2";      shift;;
     -h | --help )                 usage;                   exit;; # quit and show usage
