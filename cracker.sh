@@ -22,7 +22,7 @@ EOF
 
 function rh6_check {
   if [ -f /etc/redhat-release ]; then
-    major_v=$(cat /etc/redhat-release | sed -r 's@.*release ([0-9])+\..*@\1@g')
+    major_v=$(sed -r  's@.*release ([0-9])+\..*@\1@g' /etc/redhat-release)
     if [[ "$major_v" != 6 ]]; then
       error_exit "you are not on rh6! if you want to have a single .cracker_storage consider using this on rh6."
     fi
