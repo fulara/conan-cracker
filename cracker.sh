@@ -73,7 +73,6 @@ function init_cache {
 function crack {
   what=$1
   location=${CRACKER_CACHE_DIR}/$1
-  shift
   if [ -f $location ] ; then
     if ask_user "Location $location is already occupied" "overwrite with $what from $conan_package_name?"; then
       info "overriding $what."
@@ -182,4 +181,5 @@ fi
 
 while test ${#} -gt 0; do
   crack $1
+  shift
 done
