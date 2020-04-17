@@ -14,11 +14,13 @@ class GitConan(ConanFile):
         "apr-util/1.6.1",
         "zlib/1.2.11", 
         "lz4/1.9.2", 
+        "utf8proc/2.5.0",
     )
 
     build_requires = (
         "autoconf/2.69",
         "libtool/2.4.6",
+        "gnu-m4/1.4.18",
     )
     
     @property
