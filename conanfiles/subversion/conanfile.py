@@ -15,6 +15,8 @@ class GitConan(ConanFile):
         "zlib/1.2.11", 
         "lz4/1.9.2", 
         "utf8proc/2.5.0",
+        "swig/4.0.1",
+        "boost/1.72.0",
     )
 
     build_requires = (
@@ -44,6 +46,9 @@ class GitConan(ConanFile):
                     self.run("./autogen.sh")
                     be.configure()
                     be.make()
+                    be.make(args=["swig-pl"])
+                    be.make(args=["check-swig-pl"])
+
 
     def package(self):
         be = AutoToolsBuildEnvironment(self)
@@ -52,3 +57,11 @@ class GitConan(ConanFile):
             with tools.environment_append(be.vars):
                 with tools.environment_append(re.vars):
                     be.install()
+                    os.environ['LD_LIBRARY_PATH'] += "{}{}".format(os.pathsep, os.path.join(self.package_folder, "lib"))
+                    be.make(args=["install-swig-pl"])
+        self.run("rm {}{}{}".format(os.path.join(self.package_folder, "lib"), os.path.sep, "*swig*perl*.so*"))
+
+    def package_info(self):
+
+       self.cpp_info.libs = tools.collect_libs(self)
+       self.env_info.PERL5LIB.append(os.path.join(self.package_folder, "lib64", "perl5"))

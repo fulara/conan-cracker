@@ -7,7 +7,10 @@ class GitConan(ConanFile):
     settings = "os", "arch"
     name = "git"
     version = "2.26.1"
-    requires = "openssl/1.1.1d",
+    requires = ( 
+        "openssl/1.1.1d",
+        "subversion/1.13.0",
+    )
     build_requires = (
         "autoconf/2.69",
     )

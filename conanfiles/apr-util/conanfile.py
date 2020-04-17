@@ -14,6 +14,10 @@ class GitConan(ConanFile):
         "sqlite3/3.31.1",
     )
     
+    default_options = { 
+        "sqlite3:threadsafe": 1,
+    }
+    
     @property
     def _source_subfolder(self):
         return "source_subfolder"
