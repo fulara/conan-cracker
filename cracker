@@ -1,10 +1,7 @@
 #!/bin/bash
 
 #todo:
-#* deduce binaries
-#* cleanup usage.
 #* fix this: This will not remove the mention of that package from its creator index! may result in unexpected issues.
-#* only create index dir if package can be installed. (possibly search uses different storage path? )
 #* add --remove option ( where you can specify package name and it will remove that, requires rework of index file. 
 #* add --alias option ( where you can provide alternativ name for particular binary. 
 #*. ?
@@ -16,11 +13,34 @@ function info { echo -e "\e[32m${@}"; }
 function usage
 {
   cat << EOF
-usage: cracker.sh [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] conan_package [binaries...]
+usage: cracker [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] conan_package [binaries...]
+ -r --disable-rh-check - by default the script checks whether you are on rh6 (if the file redhat-release exists ), this is due to limitation 
+                         of the environment author currently works, if you are happy with your os and dont plan to use other ones add -r.
+                         
+ -d --deduce - instead of having list the binaries cracker would have to wrap cracker will deduce the list of binaries.
+               it will create wrappers for all binaries existing in the bin directory of particular package.
+ -g --global-cache - by default cracker will install packages into its .cracker_index - so it will instrument conan to use that as storage.path.
+                     therefore by default it only works with packages that are available on remote repositories. if you want to use a package you've built locally
+                     consider passing -g.
+
+ENV variables:
+CRACKER_STORAGE_DIR - defaults to ~/
+  tells cracker where it should store the artifacts and its files.
+
+
+example invocations:
+  cracker git/2.26.1 -d  
+    will install git into your local cracker_storage and by deducing the binaries git exposes it will create wrappers for example it will create wrapper for git
+  cracker git/2.26.1 git
+    will install git into your local cracker_storage and will create a wrapper for 'git' binary only.
+      warning: this does not check whether binary 'git' exists in particlar package. (mb it will in the future)
+  cracker git/2.26.1 git -g -d
+    will install git into your local cracker_storage, but wrappers will use your standard $CONAN_USER_HOME as a storage.path.
+
 EOF
   if [[ -n "$1" ]]; then
     warn "whereas you invoked:"
-    warn "cracker.sh ${@}"
+    warn "cracker ${@}"
   fi
 }
 
@@ -31,7 +51,7 @@ function rh6_check {
   if [ -f /etc/redhat-release ]; then
     major_v=$(sed -r  's@.*release ([0-9])+\..*@\1@g' /etc/redhat-release)
     if [[ "$major_v" != 6 ]]; then
-      error_exit "you are not on rh6! if you want to have a single .cracker_storage consider using this on rh6."
+      error_exit "you are not on rh6! if you want to have a single .cracker_storage consider using this on rh6. read usage for more details."
     fi
   else
     error_exit "you are not on rh/centos. disable this option!"
@@ -62,21 +82,21 @@ function validate_args {
 }
 
 function init_cache {
-  if [ -z ${CRACKER_CACHE_DIR} ]; then
-    CRACKER_CACHE_DIR=~/.cracker_cache
+  if [ -z ${CRACKER_STORAGE_DIR} ]; then
+    CRACKER_STORAGE_DIR=~/.cracker_storage
   else
-    CRACKER_CACHE_DIR=${CRACKER_CACHE_DIR}/.cracker_cache
+    CRACKER_STORAGE_DIR=${CRACKER_STORAGE_DIR}/.cracker_storage
   fi
 
-  CRACKER_CACHE_DIR=${CRACKER_CACHE_DIR:-~/.cracker_cache}
+  CRACKER_STORAGE_DIR=${CRACKER_STORAGE_DIR:-~/.cracker_storage}
 
-  mkdir -p $CRACKER_CACHE_DIR
-  mkdir -p $CRACKER_CACHE_DIR/.cracker_storage
+  mkdir -p $CRACKER_STORAGE_DIR
+  mkdir -p $CRACKER_STORAGE_DIR/.cracker_storage
 }
 
 function crack {
   what=$1
-  location=${CRACKER_CACHE_DIR}/$1
+  location=${CRACKER_STORAGE_DIR}/$1
   if [ -f $location ] ; then
     if ask_user "Location $location is already occupied" "overwrite with $what from $conan_package_name?"; then
       info "overriding $what."
@@ -138,20 +158,26 @@ if [[ ${#conan_package} -le 5 ]]; then
   error_exit "conan package ${conan_package} provided shorter than 5 characters.. conan does not handle that!"
 fi
 
-conan search $conan_package -r=all &> /dev/null  || error_exit "Package $conan_package not found in cache."
-echo "conan search $conan_package &> /dev/null "
+original_storage_path=$(conan config get storage.path)
+if [[ -z $global_storage ]]; then
+  conan config set storage.path=${CRACKER_STORAGE_DIR}/.cracker_storage
+fi
+conan search $conan_package -r=all &> /dev/null  || { 
+  conan config set storage.path=${original_storage_path}
+  error_exit "Package $conan_package not found in cache. keep in mind that without -g argument only packages available in remotes will work."
+}
 shift
 
 conan_package_name=$(echo "$conan_package" | cut -d'/' -f 1)
-pkg_dir=${CRACKER_CACHE_DIR}/.$conan_package_name
+pkg_dir=${CRACKER_STORAGE_DIR}/.$conan_package_name
 pkg_index=$pkg_dir/.cracker_index
 
 if [[ -d $pkg_dir ]]; then
   if ask_user "Package $conan_package already cracked" "override?"; then
-    info "deleting $conan_package from cracker_cache and all its installed packages."
+    info "deleting $conan_package from cracker_storage and all its installed packages."
     for p in $(cat $pkg_index 2>/dev/null ); do 
-       info "deleting: ${CRACKER_CACHE_DIR}/$p"
-       rm -rf ${CRACKER_CACHE_DIR}/$p
+       info "deleting: ${CRACKER_STORAGE_DIR}/$p"
+       rm -rf ${CRACKER_STORAGE_DIR}/$p
 
     done
     rm -rf $pkg_dir
@@ -161,17 +187,16 @@ if [[ -d $pkg_dir ]]; then
   fi
 fi 
 
-previous_storage_path=$(conan config get storage.path)
 #if global storage is set - we dont override storage.path.
 if [[ -z $global_storage ]]; then
-  conan config set storage.path=${CRACKER_CACHE_DIR}/.cracker_storage
+  conan config set storage.path=${CRACKER_STORAGE_DIR}/.cracker_storage
 fi
 conan install ${conan_package} -g virtualenv -g virtualrunenv -if $pkg_dir 2>&1 || {
-  conan config set storage.path=${previous_storage_path}
+  conan config set storage.path=${original_storage_path}
   echo $output
   error_exit "Failed to install $conan_package_name"
 }
-conan config set storage.path=${previous_storage_path} || error_exit "Unable to revert your storage path to previous value, your conan installation is now corrupted, previous path was: $previous_storage_path"
+conan config set storage.path=${original_storage_path} || error_exit "Unable to revert your storage path to previous value, your conan installation is now corrupted, previous path was: $original_storage_path"
 
 if [[ -n $deduce_binaries ]]; then
   pkg_path=$(sed -n -r 's@^PATH="([^"]+).*@\1@p' $pkg_dir/environment_run.sh.env)
