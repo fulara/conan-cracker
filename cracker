@@ -6,14 +6,14 @@
 #* add --alias option ( where you can provide alternativ name for particular binary. 
 #*. ?
 
-function error_exit { echo -e "\e[31m${@}" 1>&2; exit 1; }
-function warn { echo -e "\e[33m${@}"; }
-function info { echo -e "\e[32m${@}"; }
+function error_exit { echo -e "\e[31m${@}\e[0m" 1>&2; exit 1; }
+function warn { echo -e "\e[33m${@}\e[0m"; }
+function info { echo -e "\e[32m${@}\e[0m"; }
 
 function usage
 {
   cat << EOF
-usage: cracker [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] conan_package [binaries...]
+usage: cracker [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] [-o conan_option ... ] [-s conan_settings ... ]  conan_package [binaries...]
  -r --disable-rh-check - by default the script checks whether you are on rh6 (if the file redhat-release exists ), this is due to limitation 
                          of the environment author currently works, if you are happy with your os and dont plan to use other ones add -r.
                          
@@ -22,6 +22,8 @@ usage: cracker [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] conan_
  -g --global-cache - by default cracker will install packages into its .cracker_index - so it will instrument conan to use that as storage.path.
                      therefore by default it only works with packages that are available on remote repositories. if you want to use a package you've built locally
                      consider passing -g.
+ -o conan_option - can be present multiple times. is propagated as is into conan install command.
+ -s conan_setting - can be present multiple times. is propagated as is into conan install command.
 
 ENV variables:
 CRACKER_STORAGE_DIR - defaults to ~/
@@ -76,7 +78,7 @@ function validate_args {
   fi
   if [ "${#args[@]}" -lt $expected_arg_count ]; then
     usage ${orig_args[@]}
-    exit 1
+    error_exit "not enough argument passed in, see usage above."
   fi
   rh6_check
 }
@@ -92,6 +94,15 @@ function init_cache {
 
   mkdir -p $CRACKER_STORAGE_DIR
   mkdir -p $CRACKER_STORAGE_DIR/.cracker_storage
+}
+
+function check_if_package_exists {
+  #okay, seems that conan search given -r always will return success.. so we have to match by string instead.
+  if [[ $( conan search $conan_package -r=all ) = *"Existing recipe in remote"* ]]; then
+     return 0
+  else
+     return 1
+  fi
 }
 
 function crack {
@@ -125,6 +136,10 @@ EOT
 orig_args=( "${@}" )
 args=()
 
+conan_settings=()
+conan_options=()
+
+
 # named args
 while [ "$1" != "" ]; do
   case "$1" in
@@ -132,6 +147,8 @@ while [ "$1" != "" ]; do
     -d | --deduce ) deduce_binaries=yes;;
     -g | --global-storage ) global_storage=yes;;
     -h | --help )                 usage;                   exit;; # quit and show usage
+    -o ) conan_options+=( "-o" "$2" ); shift;;
+    -s ) conan_settings+=( "-s" "$2" ); shift;;
     * )                           args+=("$1")             # if no match, add it to the positional args
     esac
     shift # move to next kv pair
@@ -149,7 +166,6 @@ conan_package=$1
 if [[ ! "$conan_package" = *"/"* ]]; then
   error_exit "Selected package:\"$conan_package\" does not contain slash? required form of: name/version."
 fi 
-
 if [[ ! "$conan_package" = *"@"* ]]; then
   conan_package=${conan_package}@
 fi
@@ -162,10 +178,13 @@ original_storage_path=$(conan config get storage.path)
 if [[ -z $global_storage ]]; then
   conan config set storage.path=${CRACKER_STORAGE_DIR}/.cracker_storage
 fi
-conan search $conan_package -r=all &> /dev/null  || { 
+
+check_if_package_exists || {
   conan config set storage.path=${original_storage_path}
   error_exit "Package $conan_package not found in cache. keep in mind that without -g argument only packages available in remotes will work."
 }
+conan config set storage.path=${original_storage_path}
+
 shift
 
 conan_package_name=$(echo "$conan_package" | cut -d'/' -f 1)
@@ -191,7 +210,8 @@ fi
 if [[ -z $global_storage ]]; then
   conan config set storage.path=${CRACKER_STORAGE_DIR}/.cracker_storage
 fi
-conan install ${conan_package} -g virtualenv -g virtualrunenv -if $pkg_dir 2>&1 || {
+
+conan install ${conan_package} "${conan_options[@]}" "${conan_settings[@]}" -g virtualenv -g virtualrunenv -if $pkg_dir 2>&1 || {
   conan config set storage.path=${original_storage_path}
   echo $output
   error_exit "Failed to install $conan_package_name"
