@@ -5,7 +5,7 @@ from conans import ConanFile, CMake, tools, AutoToolsBuildEnvironment
 
 class GitConan(ConanFile):
     settings = "os", "arch"
-    name = "gnu-m4"
+    name = "m4"
     version = "1.4.18"
     
     @property
@@ -20,7 +20,7 @@ class GitConan(ConanFile):
 
     def source(self): 
         tools.get("https://github.com/tar-mirror/gnu-m4/archive/v{}.tar.gz".format(self.version))
-        os.rename("{}-{}".format(self.name, self.version), self._source_subfolder)
+        os.rename("gnu-m4-{}".format(self.version), self._source_subfolder)
         
 
     def build(self):
@@ -36,3 +36,5 @@ class GitConan(ConanFile):
             with tools.environment_append(be.vars):
                 be.install()
            
+    def package_info(self):
+        self.env_info.M4.append(os.path.join(self.package_folder, "bin", "m4"))

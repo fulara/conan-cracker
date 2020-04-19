@@ -9,6 +9,7 @@ class GitConan(ConanFile):
     version = "2.26.1"
     requires = ( 
         "openssl/1.1.1d",
+        "libcurl/7.69.1",
         "subversion/1.13.0",
     )
     build_requires = (
