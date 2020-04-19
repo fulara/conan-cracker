@@ -2,7 +2,11 @@
 
 #todo:
 #* deduce binaries
-#*. cleanup usage.
+#* cleanup usage.
+#* fix this: This will not remove the mention of that package from its creator index! may result in unexpected issues.
+#* only create index dir if package can be installed. (possibly search uses different storage path? )
+#* add --remove option ( where you can specify package name and it will remove that, requires rework of index file. 
+#* add --alias option ( where you can provide alternativ name for particular binary. 
 #*. ?
 
 function error_exit { echo -e "\e[31m${@}" 1>&2; exit 1; }

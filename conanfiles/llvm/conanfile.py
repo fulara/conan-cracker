@@ -12,6 +12,14 @@ class ClangConan(ConanFile):
     requires = (
         "zlib/1.2.11",
     )
+
+#   should these options be added?
+#    options = {
+#        "clang": [True, False],
+#        "clange-extra": [True, False],
+#        "lldb": [True, False],
+#        "compiler-rt": [True, False],
+#    }
   
 #    build_requires = (
 #       ... python on rh6.
@@ -34,7 +42,7 @@ class ClangConan(ConanFile):
             return self._cmake
       
         cmake = CMake(self)
-        cmake.definitions["LLVM_ENABLE_PROJECTS"] = "clang"
+        cmake.definitions["LLVM_ENABLE_PROJECTS"] = "clang;clang-tools-extra;lldb;compiler-rt"
         cmake.definitions["LLVM_STATIC_LINK_CXX_STDLIB"] = "ON"
         cmake.definitions["CMAKE_BUILD_TYPE"] = "Release"
         cmake.configure(build_folder = self._build_subfolder, source_folder = os.path.join(self._source_subfolder, "llvm"))
@@ -56,3 +64,6 @@ class ClangConan(ConanFile):
         with tools.chdir(self._source_subfolder):
            cmake = self._configure_cmake()
            cmake.install()
+
+    def package_info(self):
+        self.cpp_info.libs = tools.collect_libs(self)
