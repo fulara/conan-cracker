@@ -22,7 +22,7 @@ class GitConan(ConanFile):
     build_requires = (
         "autoconf/2.69",
         "libtool/2.4.6",
-        "gnu-m4/1.4.18",
+        "m4/1.4.18",
     )
     
     @property
