@@ -13,6 +13,10 @@ class ClangConan(ConanFile):
         "zlib/1.2.11",
     )
 
+    build_requires = (
+        "python/[>2.7]"
+    )
+
 #   should these options be added?
 #    options = {
 #        "clang": [True, False],
