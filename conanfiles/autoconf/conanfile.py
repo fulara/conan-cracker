@@ -45,6 +45,7 @@ class GitConan(ConanFile):
         self.env_info.AUTOCONF = os.path.join(self.package_folder, "bin", "autoconf")
         self.env_info.AUTOM4TE = os.path.join(self.package_folder, "bin", "autom4te")
         self.env_info.AC_MACRODIR = os.path.join(self.package_folder, "share", "autoconf")
+        self.env_info.AUTOM4TE_CFG = os.path.join(self.package_folder, "share", "autoconf", "autom4te.cfg")
         
         self.env_info.autom4te_perllibdir.append(os.path.join(self.package_folder, "share", "autoconf"))
         self.env_info.PERL5LIB.append(os.path.join(self.package_folder, "share", "autoconf"))
