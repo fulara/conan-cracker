@@ -6,7 +6,7 @@ from conans import ConanFile, CMake, tools, AutoToolsBuildEnvironment, RunEnviro
 class GitConan(ConanFile):
     settings = "os", "arch"
     name = "automake"
-    version = "1.16.2"
+    #version = "1.16.2"
 
     build_requires = (
         "m4/[>=1.4.18]",
