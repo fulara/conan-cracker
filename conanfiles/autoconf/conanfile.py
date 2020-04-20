@@ -9,7 +9,7 @@ class GitConan(ConanFile):
     version = "2.69"
 
     build_requires = (
-        "m4-tmp/1.4.18",
+        "m4/1.4.18",
     )
     
     @property
