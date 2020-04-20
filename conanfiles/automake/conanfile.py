@@ -42,3 +42,6 @@ class GitConan(ConanFile):
             with tools.environment_append(be.vars):
                 with tools.environment_append(re.vars):
                     be.install()
+                    
+    def package_info(self):
+        self.env_info.AUTOM4TE.append(os.path.join(self.package_folder, "bin", "autom4te"))
