@@ -6,10 +6,10 @@ from conans import ConanFile, CMake, tools, AutoToolsBuildEnvironment, RunEnviro
 class GitConan(ConanFile):
     settings = "os", "arch"
     name = "autoconf"
-    version = "2.69"
+    #version = "2.69"
 
     build_requires = (
-        "m4/1.4.18",
+        "m4/[>=1.4.18]",
     )
     
     @property
