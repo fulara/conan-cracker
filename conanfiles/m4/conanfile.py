@@ -15,9 +15,7 @@ class GitConan(ConanFile):
     @property
     def _build_subfolder(self):
         return "build_subfolder"
-
-        return tools.environment_append(at.vars)
-
+    
     def source(self): 
         tools.get("https://github.com/tar-mirror/gnu-m4/archive/v{}.tar.gz".format(self.version))
         os.rename("gnu-m4-{}".format(self.version), self._source_subfolder)
