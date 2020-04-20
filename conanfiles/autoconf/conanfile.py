@@ -42,5 +42,5 @@ class GitConan(ConanFile):
                     be.install()
                                         
     def package_info(self):
-        self.env_info.AUTOM4TE.append(os.path.join(self.package_folder, "bin", "autom4te"))
+        self.env_info.AUTOM4TE = os.path.join(self.package_folder, "bin", "autom4te")
         self.env_info.PERL5LIB.append(os.path.join(self.package_folder, "share", "autoconf"))
