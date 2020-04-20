@@ -14,7 +14,7 @@ class ClangConan(ConanFile):
     )
 
     build_requires = (
-        "python/[>2.7]"
+        "python/[2.7]"
     )
 
 #   should these options be added?
