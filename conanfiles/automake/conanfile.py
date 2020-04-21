@@ -3,7 +3,7 @@ import os
 from conans import ConanFile, CMake, tools, AutoToolsBuildEnvironment, RunEnvironment
 
 
-class GitConan(ConanFile):
+class AutomakeConan(ConanFile):
     settings = "os", "arch"
     name = "automake"
     #version = "1.16.2"
@@ -43,3 +43,7 @@ class GitConan(ConanFile):
             with tools.environment_append(be.vars):
                 with tools.environment_append(re.vars):
                     be.install()
+
+    def package_info(self):
+        ver = self.version.minor(False).replace(".", "-")
+        self.env_info.PERL5LIB.append(os.path.join(self.package_folder, "share", "automake-{}".format(self.version.minor(False))))
