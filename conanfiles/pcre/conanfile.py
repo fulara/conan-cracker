@@ -3,7 +3,7 @@ import os, stat
 from conans import ConanFile, CMake, tools, AutoToolsBuildEnvironment, RunEnvironment
 
 
-class GitConan(ConanFile):
+class PcreConan(ConanFile):
     settings = "os", "arch"
     name = "pcre"
     #version = "8.44"
