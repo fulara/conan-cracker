@@ -49,6 +49,8 @@ class ClangConan(ConanFile):
         cmake.definitions["LLVM_ENABLE_PROJECTS"] = "clang;clang-tools-extra;lldb;compiler-rt"
         cmake.definitions["LLVM_STATIC_LINK_CXX_STDLIB"] = "ON"
         cmake.definitions["CMAKE_BUILD_TYPE"] = "Release"
+        cmake.definitions["CMAKE_EXE_LINKER_FLAGS"] = "-lutil"
+        cmake.definitions["CMAKE_SHARED_LINKER_FLAGS"] = "-lutil"
         cmake.configure(build_folder = self._build_subfolder, source_folder = os.path.join(self._source_subfolder, "llvm"))
 
         self._cmake = cmake
