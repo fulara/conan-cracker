@@ -6,7 +6,7 @@ from conans import ConanFile, CMake, tools, AutoToolsBuildEnvironment, RunEnviro
 class GitConan(ConanFile):
     settings = "os", "arch"
     name = "pcre"
-    version = "8.44"
+    #version = "8.44"
 
     build_requires = (
         "automake/[>=1.16.2]",
