@@ -45,6 +45,6 @@ class AutomakeConan(ConanFile):
                     be.install()
 
     def package_info(self):
-        ver = self.version.minor(False).replace(".", "-")
+        ver = self.version.minor(False)
         self.env_info.AUTOMAKE_LIBDIR = os.path.join(self.package_folder, "share", "automake-{}".format(ver))
         self.env_info.PERL5LIB.append(os.path.join(self.package_folder, "share", "automake-{}".format(ver)))
