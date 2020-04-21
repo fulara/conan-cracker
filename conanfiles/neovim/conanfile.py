@@ -3,17 +3,17 @@ import os
 from conans import ConanFile, CMake, tools, AutoToolsBuildEnvironment, RunEnvironment
 
 
-class GitConan(ConanFile):
+class NeovimConan(ConanFile):
     settings = "os", "arch"
     name="neovim"
-    version = "0.4.3"
+    #version = "0.4.3"
    
     build_requires = (
-        "cmake/3.16.6",
-        "libtool/2.4.6",
-        "automake/1.16.2",
-        "autoconf/2.69",
-        "m4/1.4.18",
+        "cmake/[>=3.16.6]",
+        "libtool/[>=2.4.6]",
+        "automake/[>=1.16.1]",
+        "autoconf/[>=2.69]",
+        "m4/[>=1.4.18]",
     )
     
     @property
