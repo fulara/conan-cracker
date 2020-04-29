@@ -27,7 +27,8 @@ usage: cracker [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] [-o co
 
 ENV variables:
 CRACKER_STORAGE_DIR - defaults to ~/
-  tells cracker where it should store the artifacts and its files.
+  tells cracker where it should store the artifacts and its files. cracker will create a subdirectory '.cracker_storage'.
+CRACKER_STORAGE_BIN - defaults to ${CRACKER_STORAGE_DIR}/bin
 
 
 example invocations:
@@ -47,7 +48,7 @@ EOF
 }
 
 function rh6_check {
-  if [ -n $skip_rh_check ]; then
+  if [ -n "$skip_rh_check" ]; then
     return 0
   fi
   if [ -f /etc/redhat-release ]; then
@@ -86,13 +87,15 @@ function validate_args {
 function init_cache {
   if [ -z ${CRACKER_STORAGE_DIR} ]; then
     CRACKER_STORAGE_DIR=~/.cracker_storage
+    CRACKER_STORAGE_BIN=${CRACKER_STORAGE_BIN:-~/bin}
   else
+    CRACKER_STORAGE_BIN=${CRACKER_STORAGE_BIN:-${CRACKER_STORAGE_DIR}/bin}
     CRACKER_STORAGE_DIR=${CRACKER_STORAGE_DIR}/.cracker_storage
   fi
 
   CRACKER_STORAGE_DIR=${CRACKER_STORAGE_DIR:-~/.cracker_storage}
 
-  mkdir -p $CRACKER_STORAGE_DIR
+  mkdir -p $CRACKER_STORAGE_BIN
   mkdir -p $CRACKER_STORAGE_DIR/.cracker_storage
 }
 
@@ -107,7 +110,7 @@ function check_if_package_exists {
 
 function crack {
   what=$1
-  location=${CRACKER_STORAGE_DIR}/$1
+  location=${CRACKER_STORAGE_BIN}/$1
   if [ -f $location ] ; then
     if ask_user "Location $location is already occupied" "overwrite with $what from $conan_package_name?"; then
       info "overriding $what."

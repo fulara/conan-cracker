@@ -4,7 +4,7 @@ from conans import ConanFile, CMake, tools, AutoToolsBuildEnvironment
 
 
 class GitConan(ConanFile):
-    settings = "os", "arch"
+    settings = "os_build", "arch"
     name = "m4"
     version = "1.4.18"
     

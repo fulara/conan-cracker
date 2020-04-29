@@ -9,7 +9,11 @@ class GitConan(ConanFile):
     #version = "2.69"
 
     build_requires = (
+<<<<<<< HEAD
         "m4/[>=1.4.18]",
+=======
+        "m4/1.4.18",
+>>>>>>> cracker updates.
     )
     
     @property
