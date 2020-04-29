@@ -96,7 +96,7 @@ function init_cache {
   CRACKER_STORAGE_DIR=${CRACKER_STORAGE_DIR:-~/.cracker_storage}
 
   mkdir -p $CRACKER_STORAGE_BIN
-  mkdir -p $CRACKER_STORAGE_DIR/.cracker_storage
+  mkdir -p $CRACKER_STORAGE_DIR
 }
 
 function check_if_package_exists {
@@ -179,7 +179,7 @@ fi
 
 original_storage_path=$(conan config get storage.path)
 if [[ -z $global_storage ]]; then
-  conan config set storage.path=${CRACKER_STORAGE_DIR}/.cracker_storage
+  conan config set storage.path=${CRACKER_STORAGE_DIR}
 fi
 
 check_if_package_exists || {
@@ -211,7 +211,7 @@ fi
 
 #if global storage is set - we dont override storage.path.
 if [[ -z $global_storage ]]; then
-  conan config set storage.path=${CRACKER_STORAGE_DIR}/.cracker_storage
+  conan config set storage.path=${CRACKER_STORAGE_DIR}
 fi
 
 conan install ${conan_package} "${conan_options[@]}" "${conan_settings[@]}" -g virtualenv -g virtualrunenv -if $pkg_dir 2>&1 || {
