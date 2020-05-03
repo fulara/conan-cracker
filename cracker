@@ -16,7 +16,7 @@ function usage
 usage: cracker [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] [-o conan_option ... ] [-s conan_settings ... ]  conan_package [binaries...]
  -r --disable-rh-check - by default the script checks whether you are on rh6 (if the file redhat-release exists ), this is due to limitation 
                          of the environment author currently works, if you are happy with your os and dont plan to use other ones add -r.
-                         
+
  -d --deduce - instead of having list the binaries cracker would have to wrap cracker will deduce the list of binaries.
                it will create wrappers for all binaries existing in the bin directory of particular package.
  -g --global-cache - by default cracker will install packages into its .cracker_index - so it will instrument conan to use that as storage.path.
@@ -24,6 +24,8 @@ usage: cracker [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] [-o co
                      consider passing -g.
  -o conan_option - can be present multiple times. is propagated as is into conan install command.
  -s conan_setting - can be present multiple times. is propagated as is into conan install command.
+ -sp --storage-path - can be used instead of CRACKER_STORAGE_DIR environmental variable
+ -e - generate enable script.
 
 ENV variables:
 CRACKER_STORAGE_DIR - defaults to ~/
@@ -72,6 +74,38 @@ function ask_user {
 done
 }
 
+function index_file { echo "${CRACKER_STORAGE_DIR}/.cracker_index"; }
+
+function elementIn {
+  local e match="$1"
+  shift
+  for e; do [[ "$e" == "$match" ]] && return 0; done
+  return 1
+}
+
+function is_name_cracked {
+  cat "$(index_file)" | awk '{print $1}' | grep -w "$1" >> /dev/null
+}
+
+function extract_cracked_owner {
+  readarray rows < $(index_file)
+  for row_line in "${rows[@]}"; do
+    row=(${row_line})
+    package="${row[0]}"
+    row=("${row[@]:2}")
+    if elementIn "$1" "${row[@]}"; then
+      echo "$package"
+      return 0
+    fi
+  done
+  return 1
+}
+
+function remove_entry {
+  #super hacky, but.. basically ignore first two words and then remove <space>name<space> and replace with space.
+  sed -i -E "s@([^\s]+ [^\s]+)(.*)* $1 @\1 @g" $(index_file)
+}
+
 function validate_args {
   expected_arg_count=2
   if [[ -n "$deduce_binaries" ]]; then
@@ -85,7 +119,7 @@ function validate_args {
 }
 
 function init_cache {
-  if [ -z ${CRACKER_STORAGE_DIR} ]; then
+  if [ -z "${CRACKER_STORAGE_DIR}" ]; then
     CRACKER_STORAGE_DIR=~/.cracker_storage
     CRACKER_STORAGE_BIN=${CRACKER_STORAGE_BIN:-~/bin}
   else
@@ -95,12 +129,22 @@ function init_cache {
 
   CRACKER_STORAGE_DIR=${CRACKER_STORAGE_DIR:-~/.cracker_storage}
 
-  mkdir -p $CRACKER_STORAGE_BIN
-  mkdir -p $CRACKER_STORAGE_DIR
+  mkdir -p $CRACKER_STORAGE_BIN || error_exit "unable to create BIN dir ${CRACKER_STORAGE_BIN} check rights."
+  mkdir -p $CRACKER_STORAGE_DIR || error_exit "unable to create storage dir ${CRACKER_STORAGE_DIR} check rights"
+  touch -a $(index_file)
+}
+function generate_enable_script {
+  if [[ -n "$generate_enable" ]]; then
+    cat > ${CRACKER_STORAGE_BIN}/../enable_cracker << EOF
+  #!/bin/bash
+  export PATH="${CRACKER_STORAGE_BIN}:\$PATH"
+EOF
+  fi
 }
 
 function check_if_package_exists {
   #okay, seems that conan search given -r always will return success.. so we have to match by string instead.
+  #this always searches in remove only.. which is against one of the arguments.
   if [[ $( conan search $conan_package -r=all ) = *"Existing recipe in remote"* ]]; then
      return 0
   else
@@ -152,6 +196,8 @@ while [ "$1" != "" ]; do
     -h | --help )                 usage;                   exit;; # quit and show usage
     -o ) conan_options+=( "-o" "$2" ); shift;;
     -s ) conan_settings+=( "-s" "$2" ); shift;;
+    -sp | --storage-path ) CRACKER_STORAGE_DIR="$2"; unset CRACKER_STORAGE_BIN; shift;;
+    -e ) generate_enable=yes;;
     * )                           args+=("$1")             # if no match, add it to the positional args
     esac
     shift # move to next kv pair
@@ -162,6 +208,7 @@ set -- "${args[@]}"
 
 validate_args
 init_cache
+generate_enable_script
 
 command -v conan > /dev/null || error_exit "conan is not present in your path"
 conan_package=$1
@@ -221,7 +268,7 @@ conan install ${conan_package} "${conan_options[@]}" "${conan_settings[@]}" -g v
 }
 conan config set storage.path=${original_storage_path} || error_exit "Unable to revert your storage path to previous value, your conan installation is now corrupted, previous path was: $original_storage_path"
 
-if [[ -n $deduce_binaries ]]; then
+if [[ -n "$deduce_binaries" ]]; then
   pkg_path=$(sed -n -r 's@^PATH="([^"]+).*@\1@p' $pkg_dir/environment_run.sh.env)
   if [[ -z $pkg_path ]] || [[ ! -d $pkg_path ]]; then
     error_exit "You wanted binary deduction but your binary does not seem to have valid PATH?"
