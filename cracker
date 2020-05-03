@@ -84,7 +84,7 @@ function elementIn {
 }
 
 function is_name_cracked {
-  cat "$(index_file)" | awk '{print $1}' | grep -w "$1" >> /dev/null
+  grep -w "^$1" $(index_file) >> /dev/null
 }
 
 function extract_cracked_owner {
