@@ -26,8 +26,6 @@ usage: cracker [-r --disable-rh-check] [-d --deduce ] [-g --global-cache] [-o co
  -s conan_setting - can be present multiple times. is propagated as is into conan install command.
  -sp --storage-path - can be used instead of CRACKER_STORAGE_DIR environmental variable
  -e - generate enable script.
- --list - list your build tree.
- --delete conan_package: removes wrapper introduced by particular package.
 
 ENV variables:
 CRACKER_STORAGE_DIR - defaults to ~/
@@ -76,125 +74,10 @@ function ask_user {
 done
 }
 
-function index_file { echo "${CRACKER_STORAGE_DIR}/.cracker_index"; }
-
-function elementIn {
-  local e match="$1"
-  shift
-  for e; do [[ "$e" == "$match" ]] && return 0; done
-  return 1
-}
-
-function is_name_cracked {
-  grep -w "^$1" $(index_file) >> /dev/null
-}
-
-function is_wrapped {
-  readarray rows < $(index_file)
-  for row_line in "${rows[@]}"; do
-    row=(${row_line})
-    package="${row[0]}"
-    row=("${row[@]:2}")
-    if elementIn "$1" "${row[@]}"; then
-      echo "$package"
-      return 0
-    fi
-  done
-  return 1
-}
-
-function extract_cracked_owner {
-  readarray rows < $(index_file)
-  for row_line in "${rows[@]}"; do
-    row=(${row_line})
-    package="${row[0]}"
-    row=("${row[@]:2}")
-    if elementIn "$1" "${row[@]}"; then
-      echo "$package"
-      return 0
-    fi
-  done
-  return 1
-}
-
-function list_cracked {
-  readarray rows < $(index_file)
-  echo "Listing cracked packages and generated wrappers."
-  for row_line in "${rows[@]}"; do
-    row=(${row_line})
-    package="${row[0]}"
-    version="${row[1]}"
-    row=("${row[@]:2}")
-    echo "${package}/${version}: ${row[@]}" 
-  done
-}
-
-function delete_cracked {
-  readarray rows < $(index_file)
-  warn "Deleting does not delete these from conan_cache. if you want to delete stuff from conan cache its better to start from scratch"
-  for row_line in "${rows[@]}"; do
-    row=(${row_line})
-    package_name="${row[0]}"
-    row=("${row[@]:2}")
-    if [[ "$package_name" == "$1" ]]; then
-      for wrapper in "${row[@]}"; do
-        rm "${CRACKER_STORAGE_BIN}/${wrapper}"
-      done
-      remove_row "$1"
-    fi
-  done
-}
-
-function append_cracked_to_index {
-  wrapper_name="$1"
-
-  readarray rows < $(index_file)
-  rm $(index_file)
-  for row_line in "${rows[@]}"; do
-    row_line=${row_line//[$'\t\r\n']}
-    row=(${row_line})
-    package="${row[0]}"
-    if [[ "${package}" == "${conan_package_name}" ]]; then
-      echo "${row_line}$wrapper_name " >> $(index_file) #space at the end is important!
-      return 0
-    else
-      echo "${row_line} " >> $(index_file)
-    fi
-  done
-  echo "${conan_package_name} ${conan_package_version} $wrapper_name " >> $(index_file)
-}
-
-function remove_entry {
-  #super hacky, but.. basically ignore first two words and then remove <space>name<space> and replace with space.
-  sed -i -E "s@([^\s]+ [^\s]+)(.*)* $1 @\1 @g" $(index_file)
-}
-function remove_row {
-  sed -i -E "/^$1\s/d" $(index_file)
-}
-
-function init_cache {
-  if [ -z "${CRACKER_STORAGE_DIR}" ]; then
-    CRACKER_STORAGE_DIR=~/.cracker_storage
-    CRACKER_STORAGE_BIN=${CRACKER_STORAGE_BIN:-~/bin}
-  else
-    CRACKER_STORAGE_BIN=${CRACKER_STORAGE_BIN:-${CRACKER_STORAGE_DIR}/bin}
-    CRACKER_STORAGE_DIR=${CRACKER_STORAGE_DIR}/.cracker_storage
-  fi
-
-  CRACKER_STORAGE_DIR=${CRACKER_STORAGE_DIR:-~/.cracker_storage}
-
-  mkdir -p $CRACKER_STORAGE_BIN || error_exit "unable to create BIN dir ${CRACKER_STORAGE_BIN} check rights."
-  mkdir -p $CRACKER_STORAGE_DIR || error_exit "unable to create storage dir ${CRACKER_STORAGE_DIR} check rights"
-  touch -a $(index_file)
-}
-
 function validate_args {
   expected_arg_count=2
   if [[ -n "$deduce_binaries" ]]; then
     expected_arg_count=1
-  fi
-  if [[ -n "$delete_wrappers" ]]; then
-    return 0
   fi
   if [ "${#args[@]}" -lt $expected_arg_count ]; then
     usage ${orig_args[@]}
@@ -239,19 +122,9 @@ function check_if_package_exists {
 
 function crack {
   what=$1
-  switch=$2
-  switch_arg=$3
-  used_name="$what"
   location=${CRACKER_STORAGE_BIN}/$1
   if [ -f $location ] ; then
     if ask_user "Location $location is already occupied" "overwrite with $what from $conan_package_name?"; then
-      owner=$(extract_cracked_owner "$what")
-      if [[ "$?" == "0" ]]; then 
-        echo "owner is $owner"
-        remove_entry "$what"
-      else 
-        echo "index is invalid... $what is wrapped by not owned by anything?"
-      fi
       info "overriding $what."
       warn "this will not remove the mention of that package from its creator index! may result in unexpected issues."
       rm $location
@@ -271,7 +144,7 @@ source $pkg_dir/activate.sh
 $what "\${@}"
 EOT
   chmod +x $location
-  append_cracked_to_index "$used_name"
+  echo "$what" >> $pkg_index
 }
 
 #positional args
@@ -293,8 +166,6 @@ while [ "$1" != "" ]; do
     -s ) conan_settings+=( "-s" "$2" ); shift;;
     -sp | --storage-path ) CRACKER_STORAGE_DIR="$2"; unset CRACKER_STORAGE_BIN; shift;;
     -e ) generate_enable=yes;;
-    --list ) do_list_cracked=yes;;
-    --delete ) delete_wrappers="$2"; shift;;
     * )                           args+=("$1")             # if no match, add it to the positional args
     esac
     shift # move to next kv pair
@@ -303,25 +174,12 @@ done
 # restore positional args
 set -- "${args[@]}"
 
+validate_args
 init_cache
 generate_enable_script
 
-if [[ -n "${do_list_cracked}" ]]; then
-  list_cracked
-  exit 0
-fi
-
-validate_args
-
 command -v conan > /dev/null || error_exit "conan is not present in your path"
 conan_package=$1
-conan_package_name=$(echo "$conan_package" | cut -d'/' -f 1)
-conan_package_version=$(echo "$conan_package" | cut -d'/' -f 2)
-
-if [[ -n "$delete_wrappers" ]]; then
-  delete_cracked "${delete_wrappers}"
-  exit 0
-fi
 
 if [[ ! "$conan_package" = *"/"* ]]; then
   error_exit "Selected package:\"$conan_package\" does not contain slash? required form of: name/version."
@@ -347,6 +205,7 @@ conan config set storage.path=${original_storage_path}
 
 shift
 
+conan_package_name=$(echo "$conan_package" | cut -d'/' -f 1)
 pkg_dir=${CRACKER_STORAGE_DIR}/.$conan_package_name
 pkg_index=$pkg_dir/.cracker_index
 
@@ -356,7 +215,6 @@ if [[ -d $pkg_dir ]]; then
     for p in $(cat $pkg_index 2>/dev/null ); do 
        info "deleting: ${CRACKER_STORAGE_DIR}/$p"
        rm -rf ${CRACKER_STORAGE_DIR}/$p
-       #rework to new way.
 
     done
     rm -rf $pkg_dir
@@ -389,9 +247,6 @@ if [[ -n "$deduce_binaries" ]]; then
 fi
 
 while test ${#} -gt 0; do
-  crack $1 $2 $3
-  if [[ "$2" == "--alias" ]]; then
-    shift; shift;
-  fi
+  crack $1
   shift
 done
