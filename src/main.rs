@@ -3,7 +3,8 @@ use std::borrow::Borrow;
 
 use structopt::StructOpt;
 use std::io::{Write, Read, BufRead, BufReader};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, HashMap};
+use std::process::Output;
 
 /*
 whats next:
@@ -13,24 +14,20 @@ invoke conan commands.
 
 #[derive(StructOpt, Debug)]
 #[structopt(name="cracker")]
-struct Opt {
-    #[structopt(long)]
-    install: String,
+enum Opt {
+    Install {
+        #[structopt(long)]
+        wrappers : Vec<String>,
 
-    #[structopt(long)]
-    wrappers : Vec<String>,
+        #[structopt(long)]
+        prefix : Option<PathBuf>,
 
-    #[structopt(long)]
-    prefix : Option<PathBuf>,
+        #[structopt(long)]
+        bin_dir : Option<PathBuf>,
 
-    #[structopt(long)]
-    bin_dir : Option<PathBuf>,
-
-    #[structopt(long)]
-    deduce : bool,
-
-    #[structopt(long)]
-    generate_enable : bool,
+        #[structopt(long)]
+        generate_enable : bool,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, PartialOrd)]
@@ -50,6 +47,24 @@ impl Paths {
         self.prefix.join(".cracker_storage")
     }
 }
+fn execute(mut c : std::process::Command ) -> std::io::Result<std::process::Output> {
+    c.output()
+}
+
+#[derive()]
+struct Conan {
+    executor : Box<dyn Fn() -> std::io::Result<std::process::Output>>,
+}
+
+impl Conan {
+    fn new<F : 'static + Fn() -> std::io::Result<std::process::Output>>(executor : F) -> Self {
+        Self {
+            executor : Box::new(executor)
+        }
+    }
+    fn install<F : Fn() -> std::io::Result<std::process::Output>>(executor : F) {
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
 struct ConanPackage {
@@ -57,20 +72,6 @@ struct ConanPackage {
     version : String,
     user : String,
     channel : String,
-}
-
-impl ConanPackage {
-    fn full(&self) -> String {
-        format!("{}/{}@{}", self.name, self.version, self.user_channel())
-    }
-
-    fn user_channel(&self) -> String {
-        if self.user.is_empty() {
-            String::new()
-        } else {
-            format!("{}/{}", self.user, self.channel)
-        }
-    }
 }
 
 impl ConanPackage {
@@ -93,6 +94,18 @@ impl ConanPackage {
         Ok(ConanPackage {
             name,version,user,channel,
         })
+    }
+
+    fn full(&self) -> String {
+        format!("{}/{}@{}", self.name, self.version, self.user_channel())
+    }
+
+    fn user_channel(&self) -> String {
+        if self.user.is_empty() {
+            String::new()
+        } else {
+            format!("{}/{}", self.user, self.channel)
+        }
     }
 }
 
@@ -135,17 +148,23 @@ fn input<R: Read> (mut reader: BufReader<R>, message: &'_ impl std::fmt::Display
     }
 }
 
+struct Wrapper {
+    wrapped_bin : String,
+    used_name : String,
+}
+
+struct CrackerDatabaseEntry {
+    conan_pkg : ConanPackage,
+    wrappers : Vec<Wrapper>,
+}
+
 struct CrackerDatabase {
-    wrapped : BTreeMap<String, String>,
+    wrapped : Vec<CrackerDatabaseEntry>,
 }
 
 impl CrackerDatabase {
-    fn wrapped(&self, wrapper_name : &str) -> Option<(&str)> {
-        if let Some(val) = self.wrapped.get(wrapper_name) {
-            Some(val)
-        } else {
-            None
-        }
+    fn wrapped(&self, wrapper_name : &str) -> Option<(&Wrapper)> {
+        self.wrapped.iter().find_map(|e| e.wrappers.iter().find(|w| &w.used_name == wrapper_name))
     }
 }
 
@@ -157,8 +176,8 @@ struct CrackRequest {
 fn crack<R: Read>(reader: BufReader<R>, request : &CrackRequest, pkg : &ConanPackage, paths : &Paths, db : &mut CrackerDatabase) -> Vec<Action>  {
     let wrapper_path = paths.bin_dir.join(&request.wrapper_name);
     let mut actions = vec![];
-    if let Some(wrapper_pkg) = db.wrapped(&request.wrapper_name) {
-        if ! input(reader, &format!("Wrapper {} already generated for binary: {} overwrite?", request.wrapper_name, wrapper_pkg)) {
+    if let Some(wrapper) = db.wrapped(&request.wrapper_name) {
+        if ! input(reader, &format!("Wrapper {} already generated for binary: {} overwrite?", request.wrapper_name, wrapper.wrapped_bin)) {
             return Vec::new();
         }
 
@@ -181,30 +200,33 @@ fn main() {
 
     let env_path = std::env::var("CRACKER_STORAGE_DIR").ok().map(|p| PathBuf::from(p));
 
-    let prefix =
-        opt.prefix.or(env_path).expect("provide either prefix or define CRACKER_STORAGE_DIR env.");
+    match opt {
+        Opt::Install {bin_dir, prefix, generate_enable, wrappers} => {
+            let prefix =
+                prefix.or(env_path).expect("provide either prefix or define CRACKER_STORAGE_DIR env.");
 
-    let mut bin_dir = prefix.clone();
-    bin_dir.push("bin");
-    let bin_dir_env = std::env::var("CRACKER_STORAGE_BIN").ok().map(|p| PathBuf::from(p));
-    let bin_dir = opt.bin_dir.or(bin_dir_env).or(Some(bin_dir)).unwrap();
+            let mut selected_bin_dir = prefix.clone();
+            selected_bin_dir.push("bin");
+            let bin_dir_env = std::env::var("CRACKER_STORAGE_BIN").ok().map(|p| PathBuf::from(p));
+            let bin_dir = bin_dir.or(bin_dir_env).or(Some(selected_bin_dir)).unwrap();
 
-    let paths = Paths {
-        prefix,
-        bin_dir
-    };
+            let paths = Paths {
+                prefix,
+                bin_dir
+            };
 
-    init_cache(&paths);
+            init_cache(&paths);
 
-    if opt.generate_enable {
-        generate_enable_script(&paths);
+            if generate_enable {
+                generate_enable_script(&paths);
+            }
+        }
     }
-
 }
 
 #[cfg(test)]
 mod package_tests {
-    use crate::{ConanPackage, Paths, init_cache, Action, crack, CrackRequest, CrackerDatabase};
+    use crate::{ConanPackage, Paths, init_cache, Action, crack, CrackRequest, CrackerDatabase, Conan, CrackerDatabaseEntry, Wrapper};
     use std::path::PathBuf;
     use std::io::BufReader;
     use std::collections::BTreeMap;
@@ -234,6 +256,16 @@ mod package_tests {
 
     fn name_pattern_ok(package : &str) {
         assert!(ConanPackage::new(package).is_ok());
+    }
+
+    fn generate_output(stdout : &str) -> std::io::Result<std::process::Output> {
+        use std::process::{Output, ExitStatus};
+        use std::os::unix::process::ExitStatusExt;
+        Ok(Output {
+            status : ExitStatus::from_raw(0i32),
+            stderr : Vec::new(),
+            stdout : stdout.as_bytes().to_vec(),
+        })
     }
 
     #[test]
@@ -269,7 +301,7 @@ mod package_tests {
         let pkg = ConanPackage::new("abc/321@a/b").unwrap();
         let paths = Paths {prefix : PathBuf::from("some/random/path"), bin_dir : PathBuf::from("some/random/path/bin")};
 
-        let mut db = CrackerDatabase { wrapped : BTreeMap::new() };
+        let mut db = CrackerDatabase { wrapped : vec![] };
         let result = crack(BufReader::new("".as_bytes()), &req, &pkg, &paths, &mut db);
         assert_eq!(result, vec![
             Action::CreateFile {content : String::from(r#"
@@ -281,7 +313,10 @@ binary "${@}"
         ]);
 
         // binary wrapped already - user want to override.
-        db.wrapped.insert(String::from("wrap"), String::from("binary"));
+        db.wrapped.push(CrackerDatabaseEntry {
+            wrappers : vec![Wrapper { wrapped_bin : String::from("binary"), used_name : String::from("wrap")}],
+            conan_pkg : ConanPackage::new("abc/1.0.0@").unwrap(),
+        });
         let result = crack(BufReader::new("y".as_bytes()), &req, &pkg, &paths, &mut db);
         assert_eq!(result, vec![
             Action::RemoveFile { filename: PathBuf::from("some/random/path/bin/wrap") },
@@ -296,5 +331,10 @@ binary "${@}"
         // binary wrapped already - user does not want to override.
         let result = crack(BufReader::new("n".as_bytes()), &req, &pkg, &paths, &mut db);
         assert_eq!(result, vec![]);
+    }
+
+    #[test]
+    fn conan_install_fun() {
+        Conan::new(|| generate_output("abc"));
     }
 }
