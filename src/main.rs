@@ -1,21 +1,25 @@
-use std::path::{PathBuf, Path};
-use std::borrow::Borrow;
+use std::path::{PathBuf};
 
 use structopt::StructOpt;
-use std::io::{Write, Read, BufRead, BufReader};
-use std::collections::{BTreeMap, HashSet, HashMap};
-use std::process::Output;
+use std::io::{Read, BufRead, BufReader};
+use std::process::{Command, Output};
 
+mod conan_package;
+
+use crate::conan_package::*;
 /*
 whats next:
 build the db
 invoke conan commands.
+conan commands should be wrapped with setting of storage.
  */
 
 #[derive(StructOpt, Debug)]
 #[structopt(name="cracker")]
 enum Opt {
     Install {
+        reference : String,
+
         #[structopt(long)]
         wrappers : Vec<String>,
 
@@ -24,6 +28,12 @@ enum Opt {
 
         #[structopt(long)]
         bin_dir : Option<PathBuf>,
+
+        #[structopt(long, short)]
+        settings : Vec<String>,
+
+        #[structopt(long, short)]
+        options : Vec<String>,
 
         #[structopt(long)]
         generate_enable : bool,
@@ -47,65 +57,32 @@ impl Paths {
         self.prefix.join(".cracker_storage")
     }
 }
-fn execute(mut c : std::process::Command ) -> std::io::Result<std::process::Output> {
+fn execute(mut c : Command ) -> std::io::Result<std::process::Output> {
     c.output()
 }
 
-#[derive()]
 struct Conan {
-    executor : Box<dyn Fn() -> std::io::Result<std::process::Output>>,
+    executor : Box<dyn Fn(Command) -> std::io::Result<std::process::Output>>,
 }
 
 impl Conan {
-    fn new<F : 'static + Fn() -> std::io::Result<std::process::Output>>(executor : F) -> Self {
+    fn new<F : 'static + Fn(Command) -> std::io::Result<Output>>(executor : F) -> Self {
         Self {
             executor : Box::new(executor)
         }
     }
-    fn install<F : Fn() -> std::io::Result<std::process::Output>>(executor : F) {
-    }
-}
 
-#[derive(Debug, PartialEq, Clone)]
-struct ConanPackage {
-    name : String,
-    version : String,
-    user : String,
-    channel : String,
-}
-
-impl ConanPackage {
-    fn new(reference: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let regex = regex::Regex::new(r"^([^/@]+)[/]([^/@]+)(@?$|@([^/@]+)[/]([^/@]+)$)")?;
-        if ! regex.is_match(reference) {
-            Err(format!("Your reference does not match a regex pattern, {}", reference))?
-        }
-
-        if reference.len() <= 5 {
-            Err(format!("conan package provided({}) is too short, conan does not handle that 5+ charachters only.", reference))?
-        }
-        let captures = regex.captures(reference).unwrap();
-
-        let name = captures.get(1).unwrap().as_str().to_owned();
-        let version = captures.get(2).unwrap().as_str().to_owned();
-        let user = captures.get(4).map_or("", |m| m.as_str()).to_owned();
-        let channel = captures.get(5).map_or("", |m| m.as_str()).to_owned();
-
-        Ok(ConanPackage {
-            name,version,user,channel,
-        })
-    }
-
-    fn full(&self) -> String {
-        format!("{}/{}@{}", self.name, self.version, self.user_channel())
-    }
-
-    fn user_channel(&self) -> String {
-        if self.user.is_empty() {
-            String::new()
-        } else {
-            format!("{}/{}", self.user, self.channel)
-        }
+    fn install(&self, conan_pkg: &ConanPackage, install_folder : &str, settings : Vec<String>, options : Vec<String>) -> std::io::Result<Output> {
+        let settings : Vec<&str> = settings.iter().flat_map(|s| vec!["-s", s.as_ref()]).collect();
+        let options : Vec<&str> = options.iter().flat_map(|o| vec!["-o", o.as_ref()]).collect();
+        let mut c = Command::new("conan");
+        c
+            .args(&["install", &conan_pkg.full()])
+            .args(&["-if", install_folder])
+            .args(&["-g", "virtualrunenv", "-g", "virtualenv"])
+            .args(&settings)
+            .args(&options);
+        (self.executor)(c)
     }
 }
 
@@ -201,7 +178,7 @@ fn main() {
     let env_path = std::env::var("CRACKER_STORAGE_DIR").ok().map(|p| PathBuf::from(p));
 
     match opt {
-        Opt::Install {bin_dir, prefix, generate_enable, wrappers} => {
+        Opt::Install {reference, bin_dir, prefix, generate_enable, wrappers, settings, options} => {
             let prefix =
                 prefix.or(env_path).expect("provide either prefix or define CRACKER_STORAGE_DIR env.");
 
@@ -226,39 +203,17 @@ fn main() {
 
 #[cfg(test)]
 mod package_tests {
-    use crate::{ConanPackage, Paths, init_cache, Action, crack, CrackRequest, CrackerDatabase, Conan, CrackerDatabaseEntry, Wrapper};
+    use crate::{ Paths, init_cache, Action, crack, CrackRequest, CrackerDatabase, Conan, CrackerDatabaseEntry, Wrapper};
+    use crate::conan_package::ConanPackage;
     use std::path::PathBuf;
     use std::io::BufReader;
     use std::collections::BTreeMap;
+    use std::process::Command;
 
-    fn p(name : &str, ver : &str, user : &str, channel: &str) -> ConanPackage {
-        ConanPackage {
-            name : name.to_owned(),
-            version : ver.to_owned(),
-            user : user.to_owned(),
-            channel : channel.to_owned(),
+    fn assert_command_generate_output(c: Command, expected_invocation : &str, stdout : &str) -> std::io::Result<std::process::Output> {
+        let invocation = format!("{:?}", c);
+        assert_eq!(expected_invocation, invocation);
 
-
-        }
-    }
-    #[test]
-    fn test() {
-        let pkg = p("abc", "321", "", "" );
-        assert_eq!(pkg, ConanPackage::new("abc/321").unwrap());
-        assert_eq!("abc/321@", ConanPackage::new("abc/321").unwrap().full());
-        let pkg = p("abc", "321", "a", "b" );
-        assert_eq!(pkg, ConanPackage::new("abc/321@a/b").unwrap());
-    }
-
-    fn name_pattern_fail_test(package : &str) {
-        assert_eq!(ConanPackage::new(package).err().unwrap().to_string(), format!("Your reference does not match a regex pattern, {}", package));
-    }
-
-    fn name_pattern_ok(package : &str) {
-        assert!(ConanPackage::new(package).is_ok());
-    }
-
-    fn generate_output(stdout : &str) -> std::io::Result<std::process::Output> {
         use std::process::{Output, ExitStatus};
         use std::os::unix::process::ExitStatusExt;
         Ok(Output {
@@ -266,20 +221,6 @@ mod package_tests {
             stderr : Vec::new(),
             stdout : stdout.as_bytes().to_vec(),
         })
-    }
-
-    #[test]
-    fn invalid_reference_tests() {
-        name_pattern_fail_test("a");
-        name_pattern_fail_test("aaaaaa@");
-        name_pattern_ok("aaaa/aaaa@");
-
-        //user channel present without slash
-        name_pattern_fail_test("aaa/aaa@aa");
-        name_pattern_fail_test("aaa/aaa@aaaa");
-        name_pattern_ok("aaa/aaa@aaaa/a");
-
-        name_pattern_fail_test("aaa/aaa/aaa");
     }
 
     #[test]
@@ -335,6 +276,15 @@ binary "${@}"
 
     #[test]
     fn conan_install_fun() {
-        Conan::new(|| generate_output("abc"));
+        Conan::new(|c| assert_command_generate_output(
+            c,
+            r#""conan" "install" "abc/321@" "-if" "some_folder" "-g" "virtualrunenv" "-g" "virtualenv" "-s" "some_set" "-s" "another_one" "-o" "opt""#,
+            "abc"))
+            .install(
+                &ConanPackage::new("abc/321@").unwrap(),
+                "some_folder",
+                vec![String::from("some_set"), String::from("another_one")],
+                vec![String::from("opt")],
+            );
     }
 }
