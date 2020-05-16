@@ -1,17 +1,19 @@
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct ConanPackage {
-    name : String,
-    version : String,
-    user : String,
-    channel : String,
+    name: String,
+    version: String,
+    user: String,
+    channel: String,
 }
 
 impl ConanPackage {
     pub fn new(reference: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let regex = regex::Regex::new(r"^([^/@]+)[/]([^/@]+)(@?$|@([^/@]+)[/]([^/@]+)$)")?;
-        if ! regex.is_match(reference) {
-            Err(format!("Your reference does not match a regex pattern, {}", reference))?
+        if !regex.is_match(reference) {
+            Err(format!(
+                "Your reference does not match a regex pattern, {}",
+                reference
+            ))?
         }
 
         if reference.len() <= 5 {
@@ -25,7 +27,10 @@ impl ConanPackage {
         let channel = captures.get(5).map_or("", |m| m.as_str()).to_owned();
 
         Ok(ConanPackage {
-            name,version,user,channel,
+            name,
+            version,
+            user,
+            channel,
         })
     }
 
@@ -42,34 +47,34 @@ impl ConanPackage {
     }
 }
 
-
 #[cfg(test)]
 mod conan_package_tests {
     use super::*;
-    fn p(name : &str, ver : &str, user : &str, channel: &str) -> ConanPackage {
+    fn p(name: &str, ver: &str, user: &str, channel: &str) -> ConanPackage {
         ConanPackage {
-            name : name.to_owned(),
-            version : ver.to_owned(),
-            user : user.to_owned(),
-            channel : channel.to_owned(),
-
-
+            name: name.to_owned(),
+            version: ver.to_owned(),
+            user: user.to_owned(),
+            channel: channel.to_owned(),
         }
     }
-    fn name_pattern_fail_test(package : &str) {
-        assert_eq!(ConanPackage::new(package).err().unwrap().to_string(), format!("Your reference does not match a regex pattern, {}", package));
+    fn name_pattern_fail_test(package: &str) {
+        assert_eq!(
+            ConanPackage::new(package).err().unwrap().to_string(),
+            format!("Your reference does not match a regex pattern, {}", package)
+        );
     }
 
-    fn name_pattern_ok(package : &str) {
+    fn name_pattern_ok(package: &str) {
         assert!(ConanPackage::new(package).is_ok());
     }
 
     #[test]
     fn conan_package_component_extractions() {
-        let pkg = p("abc", "321", "", "" );
+        let pkg = p("abc", "321", "", "");
         assert_eq!(pkg, ConanPackage::new("abc/321").unwrap());
         assert_eq!("abc/321@", ConanPackage::new("abc/321").unwrap().full());
-        let pkg = p("abc", "321", "a", "b" );
+        let pkg = p("abc", "321", "a", "b");
         assert_eq!(pkg, ConanPackage::new("abc/321@a/b").unwrap());
     }
 
