@@ -13,7 +13,7 @@ mod conan_package;
 use crate::conan_package::*;
 /*
 whats next:
-build the db - somehwat done, whats left is loading it from cache.
+build the db - somehwat done, whats left is saving it to cache.
 invoke conan commands.
 conan commands should be wrapped with setting of storage.
 verify user
@@ -120,15 +120,14 @@ fn init_cache<Fs: filesystem::FileSystem>(
     fs: &Fs,
     paths: &Paths,
 ) -> err::Result<(CrackerDatabase)> {
-    fs.create_dir_all(paths.storage_dir())?;
-    fs.create_dir_all(paths.bin_dir.clone())?;
-
     //we need to load cache here.
     let db = if fs.is_file(paths.db_path()) {
         CrackerDatabase::load(fs, paths.db_path())?
     } else {
+        fs.create_dir_all(paths.storage_dir())?;
         CrackerDatabase::new()
     };
+    fs.create_dir_all(paths.bin_dir.clone())?;
 
     Ok(db)
 }
@@ -184,6 +183,8 @@ struct Wrapper {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct CrackerDatabaseEntry {
     conan_pkg: ConanPackage,
+    conan_settings: Vec<String>,
+    conan_options: Vec<String>,
     wrappers: Vec<Wrapper>,
 }
 
@@ -220,17 +221,23 @@ impl CrackerDatabase {
             .find_map(|e| e.wrappers.iter().find(|w| &w.wrapped_bin == wrapper_name))
     }
 
-    fn register_wrap(&mut self, binary: &str, pkg: &ConanPackage) {
+    fn register_wrap(&mut self, binary: &str, req: &CrackRequest) {
         let e_opt = self
             .wrapped
             .iter_mut()
-            .find(|entry| pkg == &entry.conan_pkg);
+            .find(|entry| {
+                req.pkg == entry.conan_pkg
+                && req.options == entry.conan_options
+                && req.settings == entry.conan_settings
+            });
         let e = if let Some(e) = e_opt {
             e
         } else {
             self.wrapped.push(CrackerDatabaseEntry {
-                conan_pkg: pkg.clone(),
+                conan_pkg: req.pkg.clone(),
                 wrappers: vec![],
+                conan_settings : req.options.to_vec(),
+                conan_options : req.settings.to_vec(),
             });
             self.wrapped.last_mut().unwrap()
         };
@@ -242,14 +249,16 @@ impl CrackerDatabase {
 }
 
 struct CrackRequest {
+    pkg : ConanPackage,
     bin_name: String,
+    settings : Vec<String>,
+    options : Vec<String>,
 }
 
 fn crack<R: Read, Fs: filesystem::FileSystem>(
     reader: BufReader<R>,
     fs: &Fs,
     request: &CrackRequest,
-    pkg: &ConanPackage,
     paths: &Paths,
     db: &mut CrackerDatabase,
 ) -> std::io::Result<()> {
@@ -281,7 +290,7 @@ source {pkg_dir}/activate.sh
         .to_owned(),
     )?;
 
-    db.register_wrap(&request.bin_name, pkg);
+    db.register_wrap(&request.bin_name, request);
 
     Ok(())
 }
@@ -398,10 +407,7 @@ mod package_tests {
         let db = init_cache(&fs, &paths).unwrap();
         assert_eq!(
             fs.create_dir_all.calls(),
-            vec![
-                PathBuf::from("some/random/path/.cracker_storage"),
-                PathBuf::from("some/random/path/bin"),
-            ]
+            vec![PathBuf::from("some/random/path/bin"),]
         );
 
         assert!(!db.storage_owned_by.is_empty());
@@ -419,10 +425,6 @@ mod package_tests {
 
         let username = whoami::username();
 
-        println!(
-            "hai: {}",
-            String::from(r#"{{"wrapped":[],"storage_owned_by":"not_me"}}"#)
-        );
         fs.read_file.return_value(Ok(String::from(
             r#"{"wrapped":[],"storage_owned_by":"not_me"}"#,
         )
@@ -441,8 +443,10 @@ mod package_tests {
     fn crack_tests() {
         let req = CrackRequest {
             bin_name: String::from("binary"),
+            pkg:  ConanPackage::new("abc/321@a/b").unwrap(),
+            settings : vec![],
+            options : vec![],
         };
-        let pkg = ConanPackage::new("abc/321@a/b").unwrap();
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
             bin_dir: PathBuf::from("some/random/path/bin"),
@@ -459,7 +463,6 @@ mod package_tests {
             BufReader::new("".as_bytes()),
             &fs,
             &req,
-            &pkg,
             &paths,
             &mut db,
         );
@@ -484,7 +487,6 @@ binary "${@}""#
             BufReader::new("y".as_bytes()),
             &fs,
             &req,
-            &pkg,
             &paths,
             &mut db,
         );
@@ -508,7 +510,6 @@ binary "${@}""#
             BufReader::new("n".as_bytes()),
             &fs,
             &req,
-            &pkg,
             &paths,
             &mut db,
         )
@@ -538,7 +539,7 @@ binary "${@}""#
             bin_dir: PathBuf::from("some/random/path/bin"),
         };
         let mut fs = filesystem::MockFileSystem::new();
-        generate_enable_script(&mut fs, &paths);
+        generate_enable_script(&mut fs, &paths).unwrap();
 
         let call = &fs.write_file.calls()[0];
         assert_eq!(call.0, PathBuf::from("some/random/path/cracker_enable"));
