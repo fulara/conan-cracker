@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Output};
 use structopt::StructOpt;
 
@@ -10,56 +10,42 @@ use serde::{Deserialize, Serialize};
 extern crate error_chain;
 
 mod conan_package;
+mod err;
+
 use crate::conan_package::*;
+use std::fs::File;
+use walkdir::{DirEntry, Error};
 /*
 whats next:
-build the db - somehwat done, whats left is saving it to cache.
-invoke conan commands.
 conan commands should be wrapped with setting of storage.
-verify user
+after installation we need to +rwx for all other users/and c curr group (bump permission)
+conan install shouldnt be returning output the conan wrapper should be analyzing the output
+
+next revision:
+add ability to install out of other db.
  */
-
-mod err {
-    error_chain! {
-        foreign_links {
-            Fmt(::std::fmt::Error);
-            Io(::std::io::Error) #[cfg(unix)];
-            SerdeJson(::serde_json::error::Error);
-        }
-
-        errors {
-            CrackerStorageDifferentUsername(owned_by: String, called_by : String) {
-                description("Cracker storage owned by different user")
-                display("Cracker storage owned by: '{}' while you are: '{}'", owned_by, called_by)
-            }
-        }
-    }
-}
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "cracker")]
 enum Opt {
-    Install {
-        reference: String,
+    Install(OptInstall),
+}
 
-        #[structopt(long)]
-        wrappers: Vec<String>,
-
-        #[structopt(long)]
-        prefix: Option<PathBuf>,
-
-        #[structopt(long)]
-        bin_dir: Option<PathBuf>,
-
-        #[structopt(long, short)]
-        settings: Vec<String>,
-
-        #[structopt(long, short)]
-        options: Vec<String>,
-
-        #[structopt(long)]
-        generate_enable: bool,
-    },
+#[derive(StructOpt, Debug)]
+struct OptInstall {
+    reference: String,
+    #[structopt(long)]
+    wrappers: Vec<String>,
+    #[structopt(long)]
+    prefix: Option<PathBuf>,
+    #[structopt(long)]
+    bin_dir: Option<PathBuf>,
+    #[structopt(long, short)]
+    settings: Vec<String>,
+    #[structopt(long, short)]
+    options: Vec<String>,
+    #[structopt(long)]
+    generate_enable: bool,
 }
 
 struct Paths {
@@ -75,6 +61,12 @@ impl Paths {
     fn db_path(&self) -> PathBuf {
         self.prefix.join(".cracker_index")
     }
+
+    fn generate_install_folder(&self, pkg_name: &str) -> PathBuf {
+        //so.. it would be better to actully randomize this - but for now its okayish.
+        //but it doesnt handle at all installing mulple version of the packages.
+        self.storage_dir().join(pkg_name)
+    }
 }
 fn execute(mut c: Command) -> std::io::Result<std::process::Output> {
     c.output()
@@ -85,10 +77,10 @@ struct Conan {
 }
 
 impl Conan {
-    fn new<F: 'static + Fn(Command) -> std::io::Result<Output>>(executor: F) -> Self {
-        Self {
+    fn new<F: 'static + Fn(Command) -> std::io::Result<Output>>(executor: F) -> err::Result<Self> {
+        Ok(Self {
             executor: Box::new(executor),
-        }
+        })
     }
 
     fn install(
@@ -215,6 +207,13 @@ impl CrackerDatabase {
             Ok(loaded)
         }
     }
+
+    fn save(&self, path: PathBuf) -> err::Result<()> {
+        let ser = serde_json::to_string(self)?;
+        use std::fs;
+        Ok(File::create(path)?.write_all(ser.as_bytes())?)
+    }
+
     fn wrapped(&self, wrapper_name: &str) -> Option<(&Wrapper)> {
         self.wrapped
             .iter()
@@ -222,22 +221,19 @@ impl CrackerDatabase {
     }
 
     fn register_wrap(&mut self, binary: &str, req: &CrackRequest) {
-        let e_opt = self
-            .wrapped
-            .iter_mut()
-            .find(|entry| {
-                req.pkg == entry.conan_pkg
+        let e_opt = self.wrapped.iter_mut().find(|entry| {
+            req.pkg == entry.conan_pkg
                 && req.options == entry.conan_options
                 && req.settings == entry.conan_settings
-            });
+        });
         let e = if let Some(e) = e_opt {
             e
         } else {
             self.wrapped.push(CrackerDatabaseEntry {
                 conan_pkg: req.pkg.clone(),
                 wrappers: vec![],
-                conan_settings : req.options.to_vec(),
-                conan_options : req.settings.to_vec(),
+                conan_settings: req.options.to_vec(),
+                conan_options: req.settings.to_vec(),
             });
             self.wrapped.last_mut().unwrap()
         };
@@ -249,10 +245,10 @@ impl CrackerDatabase {
 }
 
 struct CrackRequest {
-    pkg : ConanPackage,
+    pkg: ConanPackage,
     bin_name: String,
-    settings : Vec<String>,
-    options : Vec<String>,
+    settings: Vec<String>,
+    options: Vec<String>,
 }
 
 fn crack<R: Read, Fs: filesystem::FileSystem>(
@@ -295,6 +291,64 @@ source {pkg_dir}/activate.sh
     Ok(())
 }
 
+fn bump_permissions(path: &Path) {}
+
+fn do_install(env_path: Option<PathBuf>, i: OptInstall) -> err::Result<()> {
+    let prefix = i
+        .prefix
+        .or(env_path)
+        .expect("provide either prefix or define CRACKER_STORAGE_DIR env.");
+
+    let mut selected_bin_dir = prefix.clone();
+    selected_bin_dir.push("bin");
+    let bin_dir_env = std::env::var("CRACKER_STORAGE_BIN")
+        .ok()
+        .map(|p| PathBuf::from(p));
+    let bin_dir = i
+        .bin_dir
+        .or(bin_dir_env)
+        .or(Some(selected_bin_dir))
+        .unwrap();
+
+    let fs = filesystem::OsFileSystem::new();
+    let paths = Paths { prefix, bin_dir };
+
+    let db = init_cache(&fs, &paths)?;
+
+    if i.generate_enable {
+        generate_enable_script(&fs, &paths);
+    }
+
+    let conan = Conan::new(execute)?;
+    let conan_pkg = ConanPackage::new(&i.reference)?;
+    let if_path = paths.generate_install_folder(&conan_pkg.name);
+    let install_folder = if_path
+        .as_os_str()
+        .to_str()
+        .ok_or("unable to generate if folder")?;
+    conan.install(&conan_pkg, &install_folder, i.settings, i.options);
+
+    //wrap.
+    //rewrite permissions filesystem.
+    //dump db onto fs.
+
+    for entry in walkdir::WalkDir::new(paths.storage_dir()) {
+        match entry {
+            Ok(entry) => {
+                let p = entry.path();
+                bump_permissions(p);
+            }
+            Err(e) => {
+                println!("got error while iterating: {}", e);
+            }
+        }
+    }
+
+    db.save(paths.db_path());
+
+    Ok(())
+}
+
 fn main() {
     let opt: Opt = Opt::from_args();
     println!("{:#?}", opt);
@@ -304,33 +358,24 @@ fn main() {
         .map(|p| PathBuf::from(p));
 
     match opt {
-        Opt::Install {
-            reference,
-            bin_dir,
-            prefix,
-            generate_enable,
-            wrappers,
-            settings,
-            options,
-        } => {
-            let prefix = prefix
-                .or(env_path)
-                .expect("provide either prefix or define CRACKER_STORAGE_DIR env.");
-
-            let mut selected_bin_dir = prefix.clone();
-            selected_bin_dir.push("bin");
-            let bin_dir_env = std::env::var("CRACKER_STORAGE_BIN")
-                .ok()
-                .map(|p| PathBuf::from(p));
-            let bin_dir = bin_dir.or(bin_dir_env).or(Some(selected_bin_dir)).unwrap();
-
-            let fs = filesystem::OsFileSystem::new();
-            let paths = Paths { prefix, bin_dir };
-
-            init_cache(&fs, &paths);
-
-            if generate_enable {
-                generate_enable_script(&fs, &paths);
+        Opt::Install(i) => {
+            if let Err(e) = do_install(env_path, i) {
+                match e.0 {
+                    err::ErrorKind::Io(_) => {
+                        panic!("io error: {}", e.0);
+                    }
+                    err::ErrorKind::SerdeJson(_) => {
+                        panic!("Serde Json Error: {}", e.0);
+                    }
+                    err::ErrorKind::Msg(_) => {}
+                    err::ErrorKind::ConanNotInPath => {
+                        println!("{}", e);
+                    }
+                    err::ErrorKind::CrackerStorageDifferentUsername(_, _) => {
+                        println!("{}", e);
+                    }
+                    err::ErrorKind::__Nonexhaustive {} => {}
+                }
             }
         }
     }
@@ -443,9 +488,9 @@ mod package_tests {
     fn crack_tests() {
         let req = CrackRequest {
             bin_name: String::from("binary"),
-            pkg:  ConanPackage::new("abc/321@a/b").unwrap(),
-            settings : vec![],
-            options : vec![],
+            pkg: ConanPackage::new("abc/321@a/b").unwrap(),
+            settings: vec![],
+            options: vec![],
         };
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
@@ -459,13 +504,7 @@ mod package_tests {
             storage_owned_by: String::new(),
         };
         assert!(db.wrapped(&req.bin_name).is_none());
-        let result = crack(
-            BufReader::new("".as_bytes()),
-            &fs,
-            &req,
-            &paths,
-            &mut db,
-        );
+        let result = crack(BufReader::new("".as_bytes()), &fs, &req, &paths, &mut db);
         assert_eq!(
             db.wrapped(&req.bin_name),
             Some(&Wrapper {
@@ -483,13 +522,7 @@ binary "${@}""#
         );
 
         let fs = filesystem::MockFileSystem::new();
-        let result = crack(
-            BufReader::new("y".as_bytes()),
-            &fs,
-            &req,
-            &paths,
-            &mut db,
-        );
+        let result = crack(BufReader::new("y".as_bytes()), &fs, &req, &paths, &mut db);
         assert_eq!(
             fs.remove_file.calls()[0],
             PathBuf::from("some/random/path/bin/binary")
@@ -506,14 +539,7 @@ binary "${@}""#
 
         // binary wrapped already - user does not want to override.
         let fs = filesystem::MockFileSystem::new();
-        crack(
-            BufReader::new("n".as_bytes()),
-            &fs,
-            &req,
-            &paths,
-            &mut db,
-        )
-        .unwrap();
+        crack(BufReader::new("n".as_bytes()), &fs, &req, &paths, &mut db).unwrap();
         assert!(fs.remove_file.calls().is_empty());
         assert!(fs.write_file.calls().is_empty());
     }
@@ -523,7 +549,7 @@ binary "${@}""#
         Conan::new(|c| assert_command_generate_output(
             c,
             r#""conan" "install" "abc/321@" "-if" "some_folder" "-g" "virtualrunenv" "-g" "virtualenv" "-s" "some_set" "-s" "another_one" "-o" "opt""#,
-            "abc"))
+            "abc")).unwrap()
             .install(
                 &ConanPackage::new("abc/321@").unwrap(),
                 "some_folder",

@@ -1,16 +1,19 @@
 use serde::{Deserialize, Serialize};
 
+use crate::err;
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ConanPackage {
-    name: String,
-    version: String,
-    user: String,
-    channel: String,
+    pub name: String,
+    pub version: String,
+    pub user: String,
+    pub channel: String,
 }
 
 impl ConanPackage {
-    pub fn new(reference: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let regex = regex::Regex::new(r"^([^/@]+)[/]([^/@]+)(@?$|@([^/@]+)[/]([^/@]+)$)")?;
+    pub fn new(reference: &str) -> err::Result<(Self)> {
+        let regex = regex::Regex::new(r"^([^/@]+)[/]([^/@]+)(@?$|@([^/@]+)[/]([^/@]+)$)")
+            .expect("Conan Package regex was invalid.");
         if !regex.is_match(reference) {
             Err(format!(
                 "Your reference does not match a regex pattern, {}",
