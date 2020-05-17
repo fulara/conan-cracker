@@ -4,8 +4,12 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Output};
 use structopt::StructOpt;
 
-mod conan_package;
+use serde::{Deserialize, Serialize};
 
+#[macro_use]
+extern crate error_chain;
+
+mod conan_package;
 use crate::conan_package::*;
 /*
 whats next:
@@ -14,6 +18,23 @@ invoke conan commands.
 conan commands should be wrapped with setting of storage.
 verify user
  */
+
+mod err {
+    error_chain! {
+        foreign_links {
+            Fmt(::std::fmt::Error);
+            Io(::std::io::Error) #[cfg(unix)];
+            SerdeJson(::serde_json::error::Error);
+        }
+
+        errors {
+            CrackerStorageDifferentUsername(owned_by: String, called_by : String) {
+                description("Cracker storage owned by different user")
+                display("Cracker storage owned by: '{}' while you are: '{}'", owned_by, called_by)
+            }
+        }
+    }
+}
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "cracker")]
@@ -49,6 +70,10 @@ struct Paths {
 impl Paths {
     fn storage_dir(&self) -> PathBuf {
         self.prefix.join(".cracker_storage")
+    }
+
+    fn db_path(&self) -> PathBuf {
+        self.prefix.join(".cracker_index")
     }
 }
 fn execute(mut c: Command) -> std::io::Result<std::process::Output> {
@@ -91,31 +116,29 @@ impl Conan {
     }
 }
 
-fn init_cache<Fs: filesystem::FileSystem>(fs: &Fs, paths: &Paths) -> std::io::Result<()> {
+fn init_cache<Fs: filesystem::FileSystem>(
+    fs: &Fs,
+    paths: &Paths,
+) -> err::Result<(CrackerDatabase)> {
     fs.create_dir_all(paths.storage_dir())?;
     fs.create_dir_all(paths.bin_dir.clone())?;
 
     //we need to load cache here.
+    let db = if fs.is_file(paths.db_path()) {
+        CrackerDatabase::load(fs, paths.db_path())?
+    } else {
+        CrackerDatabase::new()
+    };
 
-    Ok(())
+    Ok(db)
 }
 
-fn generate_enable_script<Fs: filesystem::FileSystem>(
-    fs: &Fs,
-    paths: &Paths,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_enable_script<Fs: filesystem::FileSystem>(fs: &Fs, paths: &Paths) -> err::Result<()> {
     let path = paths
         .bin_dir
         .parent()
         .ok_or("Unable to extract parent path")?
         .join("cracker_enable");
-    // let mut file = std::fs::File::create(path)?;
-
-    // file.write_all(
-    // Ok(Action::CreateFile {
-    //     content:
-    //     filename: path,
-    // })
 
     fs.write_file(
         path,
@@ -153,24 +176,44 @@ fn input<R: Read>(mut reader: BufReader<R>, message: &'_ impl std::fmt::Display)
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Wrapper {
     wrapped_bin: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct CrackerDatabaseEntry {
     conan_pkg: ConanPackage,
     wrappers: Vec<Wrapper>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct CrackerDatabase {
     wrapped: Vec<CrackerDatabaseEntry>,
     storage_owned_by: String,
 }
 
 impl CrackerDatabase {
+    fn new() -> Self {
+        CrackerDatabase {
+            wrapped: vec![],
+            storage_owned_by: whoami::username(),
+        }
+    }
+    fn load<Fs: filesystem::FileSystem>(fs: &Fs, path: PathBuf) -> err::Result<Self> {
+        let content = &fs.read_file(path)?;
+        let loaded: Self = serde_json::from_slice(&content)?;
+
+        if loaded.storage_owned_by != whoami::username() {
+            Err(err::ErrorKind::CrackerStorageDifferentUsername(
+                loaded.storage_owned_by,
+                whoami::username(),
+            )
+            .into())
+        } else {
+            Ok(loaded)
+        }
+    }
     fn wrapped(&self, wrapper_name: &str) -> Option<(&Wrapper)> {
         self.wrapped
             .iter()
@@ -288,7 +331,7 @@ fn main() {
 mod package_tests {
     use crate::conan_package::ConanPackage;
     use crate::{
-        crack, generate_enable_script, init_cache, Conan, CrackRequest, CrackerDatabase,
+        crack, err, generate_enable_script, init_cache, Conan, CrackRequest, CrackerDatabase,
         CrackerDatabaseEntry, Paths, Wrapper,
     };
     use std::collections::BTreeMap;
@@ -321,14 +364,77 @@ mod package_tests {
         };
 
         let fs = filesystem::MockFileSystem::new();
-        init_cache(&fs, &paths);
+        fs.is_file.return_value(false);
+        let db = init_cache(&fs, &paths).unwrap();
         assert_eq!(
             fs.create_dir_all.calls(),
             vec![
                 PathBuf::from("some/random/path/.cracker_storage"),
                 PathBuf::from("some/random/path/bin"),
             ]
+        );
+
+        assert!(!db.storage_owned_by.is_empty())
+    }
+
+    #[test]
+    fn init_cache_dir_db_already_exists() {
+        let paths = Paths {
+            prefix: PathBuf::from("some/random/path"),
+            bin_dir: PathBuf::from("some/random/path/bin"),
+        };
+
+        let fs = filesystem::MockFileSystem::new();
+        fs.is_file.return_value(true);
+
+        let username = whoami::username();
+
+        fs.read_file.return_value(Ok(String::from(format!(
+            r#"{{"wrapped":[],"storage_owned_by":"{}"}}"#,
+            username
+        ))
+        .as_bytes()
+        .to_vec()));
+        let db = init_cache(&fs, &paths).unwrap();
+        assert_eq!(
+            fs.create_dir_all.calls(),
+            vec![
+                PathBuf::from("some/random/path/.cracker_storage"),
+                PathBuf::from("some/random/path/bin"),
+            ]
+        );
+
+        assert!(!db.storage_owned_by.is_empty());
+    }
+
+    #[test]
+    fn init_cache_dir_db_already_exists_diff_username() {
+        let paths = Paths {
+            prefix: PathBuf::from("some/random/path"),
+            bin_dir: PathBuf::from("some/random/path/bin"),
+        };
+
+        let fs = filesystem::MockFileSystem::new();
+        fs.is_file.return_value(true);
+
+        let username = whoami::username();
+
+        println!(
+            "hai: {}",
+            String::from(r#"{{"wrapped":[],"storage_owned_by":"not_me"}}"#)
+        );
+        fs.read_file.return_value(Ok(String::from(
+            r#"{"wrapped":[],"storage_owned_by":"not_me"}"#,
         )
+        .as_bytes()
+        .to_vec()));
+        let result = init_cache(&fs, &paths);
+        let display = format!("{}", result.err().unwrap());
+        assert_eq!(
+            display,
+            r#"Cracker storage owned by: 'not_me' while you are: 'fulara'"#
+        );
+        assert!(fs.create_dir_all.calls().is_empty());
     }
 
     #[test]
