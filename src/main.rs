@@ -17,8 +17,7 @@ use std::fs::File;
 use walkdir::{DirEntry, Error};
 /*
 whats next:
-conan commands should be wrapped with setting of storage.
-after installation we need to +rwx for all other users/and c curr group (bump permission)
+conan commands should be wrapped with setting of storage - seems because of that the executor needs to be an rc actually .. or passed by reference
 conan install shouldnt be returning output the conan wrapper should be analyzing the output
 
 next revision:
@@ -70,6 +69,49 @@ impl Paths {
 }
 fn execute(mut c: Command) -> std::io::Result<std::process::Output> {
     c.output()
+}
+
+struct ConanStorageGuard {
+    executor: Box<dyn Fn(Command) -> std::io::Result<std::process::Output>>,
+    original_storage: String,
+    storage_path: String,
+}
+
+impl ConanStorageGuard {
+    pub fn new<F: 'static + Clone + Fn(Command) -> std::io::Result<Output>>(
+        executor: F,
+        storage_path: String,
+    ) -> err::Result<Self> {
+        Ok(Self {
+            executor: Box::new(executor.clone()),
+            original_storage: Self::get_storage_path(executor.clone()),
+            storage_path,
+        })
+    }
+
+    fn get_storage_path<F: 'static + Fn(Command) -> std::io::Result<Output>>(
+        executor: F,
+    ) -> String {
+        let mut c = Command::new("conan");
+        c.args(&["config", "get", "storage.path"]);
+        let output = executor(c).expect(&format!("Unable to extract result of get storage path"));
+        std::str::from_utf8(&output.stdout)
+            .expect(&format!("Borked output from get storage path."))
+            .to_owned()
+    }
+
+    fn set_storage_path<F: 'static + Fn(Command) -> std::io::Result<Output>>(
+        executor: F,
+        path: &str,
+    ) {
+        let mut c = Command::new("conan");
+        c.args(&["config", "set", "storage.path", path]);
+        executor(c).expect(&format!("Unable to set storage path!"));
+    }
+}
+
+impl Drop for ConanStorageGuard {
+    fn drop(&mut self) {}
 }
 
 struct Conan {
@@ -291,7 +333,26 @@ source {pkg_dir}/activate.sh
     Ok(())
 }
 
-fn bump_permissions(path: &Path) {}
+fn expand_mode_to_all_users(mode: u32) -> u32 {
+    let lit = 0o700 & mode;
+    mode | (lit >> 3) | (lit >> 6)
+}
+
+fn bump_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let meta =
+        std::fs::metadata(path).expect(&format!("Unable to get metadata for {}", path.display()));
+    let mut permissions = meta.permissions();
+    let curr_mode = permissions.mode();
+    let expanded_mode = expand_mode_to_all_users(curr_mode);
+    if curr_mode != expanded_mode {
+        permissions.set_mode(expanded_mode);
+        std::fs::set_permissions(path, permissions).expect(&format!(
+            "Unable to set permissions for: {}",
+            path.display()
+        ))
+    }
+}
 
 fn do_install(env_path: Option<PathBuf>, i: OptInstall) -> err::Result<()> {
     let prefix = i
@@ -385,8 +446,8 @@ fn main() {
 mod package_tests {
     use crate::conan_package::ConanPackage;
     use crate::{
-        crack, err, generate_enable_script, init_cache, Conan, CrackRequest, CrackerDatabase,
-        CrackerDatabaseEntry, Paths, Wrapper,
+        crack, err, expand_mode_to_all_users, generate_enable_script, init_cache, Conan,
+        CrackRequest, CrackerDatabase, CrackerDatabaseEntry, Paths, Wrapper,
     };
     use std::collections::BTreeMap;
     use std::io::BufReader;
@@ -576,5 +637,14 @@ binary "${@}""#
 export PATH="some/random/path/bin:$PATH""#
         )
         // let f = std::fs::Permissions::
+    }
+
+    #[test]
+    fn expand_mode_to_all_users_test() {
+        assert_eq!(expand_mode_to_all_users(0o100u32), 0o111);
+        assert_eq!(expand_mode_to_all_users(0o300u32), 0o333);
+        assert_eq!(expand_mode_to_all_users(0o644u32), 0o666);
+        assert_eq!(expand_mode_to_all_users(0o713u32), 0o777);
+        assert_eq!(expand_mode_to_all_users(0o134u32), 0o135);
     }
 }
