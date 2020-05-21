@@ -17,7 +17,7 @@ use std::fs::File;
 use walkdir::{DirEntry, Error};
 /*
 whats next:
-wrap is missing!
+default wrap is missing - deduction!
 conan install shouldnt be returning output the conan wrapper should be analyzing the output
 conan install should print the output (possibly only in case of error )
 
@@ -359,6 +359,23 @@ fn bump_permissions(path: &Path) {
     }
 }
 
+fn extract_path<Fs : filesystem::FileSystem>(fs : &Fs, path : PathBuf) -> Option<String> {
+    let content = fs.read_file(path).ok()?;
+    let content = std::str::from_utf8(&content).ok()?;
+    for line in content.lines() {
+        if line.starts_with("PATH=") {
+            let regex = regex::Regex::new(r#"^PATH="([^"]+)."#)
+                .expect("Path deduction regex was invalid.");
+            let captures = regex.captures(line).expect("Installed binary didnt have proper PATH?");
+            let path = captures.get(1).expect("Installed binary didnt have proper PATH?");
+
+            return Some(path.as_str().to_owned());
+        }
+    }
+
+    None
+}
+
 fn do_install(env_path: Option<PathBuf>, i: OptInstall) -> err::Result<()> {
     let prefix = i
         .prefix
@@ -392,7 +409,28 @@ fn do_install(env_path: Option<PathBuf>, i: OptInstall) -> err::Result<()> {
         .as_os_str()
         .to_str()
         .ok_or("unable to generate if folder")?;
-    conan.install(&conan_pkg, &paths, &install_folder, i.settings, i.options);
+    conan.install(&conan_pkg, &paths, &install_folder, i.settings, i.options)?;
+
+    let env_run_path = if_path.join("environment_run.sh.env");
+    let path = extract_path(&fs, env_run_path).expect("environment_run.sh.env did not contain correct PATH? non binary package requested?");
+
+    for entry in walkdir::WalkDir::new(path) {
+        match entry {
+            Ok(entry) => {
+                let p = entry.path();
+                use std::os::unix::fs::PermissionsExt;
+                if 0o100 & std::fs::metadata(p).expect("unable to extract metadata").permissions().mode() != 0 {
+                    // gene
+                    asdsadsadsa finish this...
+                }
+            }
+            Err(e) => {
+                println!("got error while iterating: {}", e);
+            }
+        }
+    }
+
+
 
     //wrap.
     for entry in walkdir::WalkDir::new(paths.storage_dir()) {
@@ -447,10 +485,7 @@ fn main() {
 #[cfg(test)]
 mod package_tests {
     use crate::conan_package::ConanPackage;
-    use crate::{
-        crack, err, expand_mode_to_all_users, generate_enable_script, init_cache, Conan,
-        CrackRequest, CrackerDatabase, CrackerDatabaseEntry, Paths, Wrapper,
-    };
+    use crate::{crack, err, expand_mode_to_all_users, generate_enable_script, init_cache, Conan, CrackRequest, CrackerDatabase, CrackerDatabaseEntry, Paths, Wrapper, extract_path};
     use std::collections::BTreeMap;
     use std::io::BufReader;
     use std::path::PathBuf;
@@ -659,6 +694,17 @@ export PATH="some/random/path/bin:$PATH""#
         )
         // let f = std::fs::Permissions::
     }
+    #[test]
+    fn extract_test_path() {
+        let mut fs = filesystem::MockFileSystem::new();
+        fs.read_file.return_value(Ok(String::from(r#"
+abcabcabc
+PATH="wole":"abc"
+        "#).into_bytes()));
+
+        assert_eq!(extract_path(&fs, PathBuf::new()), Some(String::from("wole")));
+    }
+
 
     #[test]
     fn expand_mode_to_all_users_test() {
