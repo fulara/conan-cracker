@@ -17,8 +17,9 @@ use std::fs::File;
 use walkdir::{DirEntry, Error};
 /*
 whats next:
-conan commands should be wrapped with setting of storage - seems because of that the executor needs to be an rc actually .. or passed by reference
+wrap is missing!
 conan install shouldnt be returning output the conan wrapper should be analyzing the output
+conan install should print the output (possibly only in case of error )
 
 next revision:
 add ability to install out of other db.
@@ -71,27 +72,30 @@ fn execute(mut c: Command) -> std::io::Result<std::process::Output> {
     c.output()
 }
 
-struct ConanStorageGuard {
-    executor: Box<dyn Fn(Command) -> std::io::Result<std::process::Output>>,
+struct ConanStorageGuard<Executor: Fn(Command) -> std::io::Result<std::process::Output>> {
+    executor: Executor,
     original_storage: String,
-    storage_path: String,
 }
 
-impl ConanStorageGuard {
-    pub fn new<F: 'static + Clone + Fn(Command) -> std::io::Result<Output>>(
-        executor: F,
-        storage_path: String,
-    ) -> err::Result<Self> {
-        Ok(Self {
-            executor: Box::new(executor.clone()),
-            original_storage: Self::get_storage_path(executor.clone()),
-            storage_path,
-        })
+impl<Executor: Fn(Command) -> std::io::Result<std::process::Output>> ConanStorageGuard<Executor> {
+    pub fn new(executor: Executor, storage_path: &Path) -> Self {
+        let guard = Self {
+            original_storage: Self::get_storage_path(&executor),
+            executor,
+        };
+
+        Self::set_storage_path(
+            &guard.executor,
+            storage_path
+                .as_os_str()
+                .to_str()
+                .expect("Guard::new Path not str?"),
+        );
+
+        guard
     }
 
-    fn get_storage_path<F: 'static + Fn(Command) -> std::io::Result<Output>>(
-        executor: F,
-    ) -> String {
+    fn get_storage_path(executor: &Executor) -> String {
         let mut c = Command::new("conan");
         c.args(&["config", "get", "storage.path"]);
         let output = executor(c).expect(&format!("Unable to extract result of get storage path"));
@@ -100,38 +104,39 @@ impl ConanStorageGuard {
             .to_owned()
     }
 
-    fn set_storage_path<F: 'static + Fn(Command) -> std::io::Result<Output>>(
-        executor: F,
-        path: &str,
-    ) {
+    fn set_storage_path(executor: &Executor, path: &str) {
         let mut c = Command::new("conan");
         c.args(&["config", "set", "storage.path", path]);
         executor(c).expect(&format!("Unable to set storage path!"));
     }
 }
 
-impl Drop for ConanStorageGuard {
-    fn drop(&mut self) {}
+impl<Executor: Fn(Command) -> std::io::Result<std::process::Output>> Drop
+    for ConanStorageGuard<Executor>
+{
+    fn drop(&mut self) {
+        Self::set_storage_path(&self.executor, &self.original_storage);
+    }
 }
 
-struct Conan {
-    executor: Box<dyn Fn(Command) -> std::io::Result<std::process::Output>>,
+struct Conan<Executor> {
+    executor: Executor,
 }
 
-impl Conan {
-    fn new<F: 'static + Fn(Command) -> std::io::Result<Output>>(executor: F) -> err::Result<Self> {
-        Ok(Self {
-            executor: Box::new(executor),
-        })
+impl<Executor: Clone + Fn(Command) -> std::io::Result<std::process::Output>> Conan<Executor> {
+    fn new(executor: Executor) -> err::Result<Self> {
+        Ok(Self { executor })
     }
 
     fn install(
         &self,
         conan_pkg: &ConanPackage,
+        paths: &Paths,
         install_folder: &str,
         settings: Vec<String>,
         options: Vec<String>,
-    ) -> std::io::Result<Output> {
+    ) -> err::Result<Output> {
+        let guard = ConanStorageGuard::new(self.executor.clone(), &paths.storage_dir());
         let settings: Vec<&str> = settings
             .iter()
             .flat_map(|s| vec!["-s", s.as_ref()])
@@ -146,7 +151,7 @@ impl Conan {
             .args(&["-g", "virtualrunenv", "-g", "virtualenv"])
             .args(&settings)
             .args(&options);
-        (self.executor)(c)
+        Ok((self.executor)(c)?)
     }
 }
 
@@ -387,12 +392,9 @@ fn do_install(env_path: Option<PathBuf>, i: OptInstall) -> err::Result<()> {
         .as_os_str()
         .to_str()
         .ok_or("unable to generate if folder")?;
-    conan.install(&conan_pkg, &install_folder, i.settings, i.options);
+    conan.install(&conan_pkg, &paths, &install_folder, i.settings, i.options);
 
     //wrap.
-    //rewrite permissions filesystem.
-    //dump db onto fs.
-
     for entry in walkdir::WalkDir::new(paths.storage_dir()) {
         match entry {
             Ok(entry) => {
@@ -456,11 +458,11 @@ mod package_tests {
 
     fn assert_command_generate_output(
         c: Command,
-        expected_invocation: &str,
+        sender: std::sync::mpsc::Sender<String>,
         stdout: &str,
     ) -> std::io::Result<std::process::Output> {
         let invocation = format!("{:?}", c);
-        assert_eq!(expected_invocation, invocation);
+        sender.send(invocation);
 
         use std::os::unix::process::ExitStatusExt;
         use std::process::{ExitStatus, Output};
@@ -607,16 +609,35 @@ binary "${@}""#
 
     #[test]
     fn conan_install_fun() {
-        Conan::new(|c| assert_command_generate_output(
-            c,
-            r#""conan" "install" "abc/321@" "-if" "some_folder" "-g" "virtualrunenv" "-g" "virtualenv" "-s" "some_set" "-s" "another_one" "-o" "opt""#,
-            "abc")).unwrap()
+        let mut expected_invocations = vec![
+            String::from(r#""conan" "config" "get" "storage.path""#),
+            String::from(
+                r#""conan" "config" "set" "storage.path" "some/random/path/.cracker_storage""#,
+            ),
+            String::from(
+                r#""conan" "install" "abc/321@" "-if" "some_folder" "-g" "virtualrunenv" "-g" "virtualenv" "-s" "some_set" "-s" "another_one" "-o" "opt""#,
+            ),
+            String::from(r#""conan" "config" "set" "storage.path" "abc""#),
+        ];
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        let paths = Paths {
+            prefix: PathBuf::from("some/random/path"),
+            bin_dir: PathBuf::from("some/random/path/bin"),
+        };
+
+        Conan::new(|c| assert_command_generate_output(c, sender.clone(), "abc"))
+            .unwrap()
             .install(
                 &ConanPackage::new("abc/321@").unwrap(),
+                &paths,
                 "some_folder",
                 vec![String::from("some_set"), String::from("another_one")],
                 vec![String::from("opt")],
             );
+        let captured_invocations: Vec<String> = receiver.try_iter().collect();
+        assert_eq!(captured_invocations, expected_invocations);
     }
 
     #[test]
