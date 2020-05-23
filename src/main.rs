@@ -17,13 +17,23 @@ use std::fs::File;
 use walkdir::{DirEntry, Error};
 /*
 whats next:
-default wrap is missing - deduction!
-conan install shouldnt be returning output the conan wrapper should be analyzing the output
-conan install should print the output (possibly only in case of error )
 
 next revision:
-add ability to install out of other db.
+add ability to install out of index file.
+add ability to provide prefix/suffix for installed wrappers.
  */
+
+fn info(text: &str) {
+    println!("{}", text);
+}
+
+fn warn(text: &str) {
+    println!("{}", text);
+}
+
+fn error(text: &str) {
+    println!("{}", text);
+}
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "cracker")]
@@ -69,6 +79,7 @@ impl Paths {
     }
 }
 fn execute(mut c: Command) -> std::io::Result<std::process::Output> {
+    info(&format!("now invoking: {:?}", c));
     c.output()
 }
 
@@ -106,8 +117,8 @@ impl<Executor: Fn(Command) -> std::io::Result<std::process::Output>> ConanStorag
 
     fn set_storage_path(executor: &Executor, path: &str) {
         let mut c = Command::new("conan");
-        c.args(&["config", "set", "storage.path", path]);
-        executor(c).expect(&format!("Unable to set storage path!"));
+        c.args(&["config", "set", &format!("storage.path={}", path)]);
+        let c = executor(c).expect(&format!("Unable to set storage path!"));
     }
 }
 
@@ -133,9 +144,10 @@ impl<Executor: Clone + Fn(Command) -> std::io::Result<std::process::Output>> Con
         conan_pkg: &ConanPackage,
         paths: &Paths,
         install_folder: &str,
-        settings: Vec<String>,
-        options: Vec<String>,
-    ) -> err::Result<Output> {
+        settings: &[String],
+        options: &[String],
+    ) -> err::Result<()> {
+        info(&format!("Installing package: {}", conan_pkg.full()));
         let guard = ConanStorageGuard::new(self.executor.clone(), &paths.storage_dir());
         let settings: Vec<&str> = settings
             .iter()
@@ -151,7 +163,14 @@ impl<Executor: Clone + Fn(Command) -> std::io::Result<std::process::Output>> Con
             .args(&["-g", "virtualrunenv", "-g", "virtualenv"])
             .args(&settings)
             .args(&options);
-        Ok((self.executor)(c)?)
+
+        let output = (self.executor)(c)?;
+
+        if !output.status.success() {
+            Err(err::ErrorKind::ConanInstallFailure(output).into())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -203,13 +222,17 @@ fn input<R: Read>(mut reader: BufReader<R>, message: &'_ impl std::fmt::Display)
             .expect("Failed to read from stdin");
 
         let ans = ans.to_lowercase();
+        let ans = ans.trim();
 
-        if &ans == "y" || &ans == "yes" {
+        if ans == "y" || ans == "yes" {
             return true;
-        } else if &ans == "n" || &ans == "no" {
+        } else if ans == "n" || ans == "no" {
             return false;
         } else {
-            println!("only [y|yes|n|no] is accepted as an answer.")
+            println!(
+                "only [y|yes|n|no] is accepted as an answer. you gave: {}",
+                ans
+            )
         }
     }
 }
@@ -256,7 +279,7 @@ impl CrackerDatabase {
     }
 
     fn save(&self, path: PathBuf) -> err::Result<()> {
-        let ser = serde_json::to_string(self)?;
+        let ser = serde_json::to_string_pretty(self)?;
         use std::fs;
         Ok(File::create(path)?.write_all(ser.as_bytes())?)
     }
@@ -305,6 +328,7 @@ fn crack<R: Read, Fs: filesystem::FileSystem>(
     paths: &Paths,
     db: &mut CrackerDatabase,
 ) -> std::io::Result<()> {
+    info(&format!("Creating wrapper for: {}", request.bin_name));
     let wrapper_path = paths.bin_dir.join(&request.bin_name);
     if let Some(wrapper) = db.wrapped(&request.bin_name) {
         if !input(
@@ -326,12 +350,19 @@ source {pkg_dir}/activate_run.sh
 source {pkg_dir}/activate.sh
 {bin_name} "${{@}}"
 "#,
-            pkg_dir = paths.bin_dir.display(),
+            pkg_dir = paths.generate_install_folder(&request.pkg.name).display(),
             bin_name = request.bin_name
         )
         .trim()
         .to_owned(),
     )?;
+    if let Ok(metadata) = std::fs::metadata(&wrapper_path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = metadata.permissions();
+        let exec_all = perms.mode() | 0o111;
+        perms.set_mode(exec_all);
+        std::fs::set_permissions(wrapper_path, perms);
+    }
 
     db.register_wrap(&request.bin_name, request);
 
@@ -359,15 +390,19 @@ fn bump_permissions(path: &Path) {
     }
 }
 
-fn extract_path<Fs : filesystem::FileSystem>(fs : &Fs, path : PathBuf) -> Option<String> {
+fn extract_path<Fs: filesystem::FileSystem>(fs: &Fs, path: PathBuf) -> Option<String> {
     let content = fs.read_file(path).ok()?;
     let content = std::str::from_utf8(&content).ok()?;
     for line in content.lines() {
         if line.starts_with("PATH=") {
-            let regex = regex::Regex::new(r#"^PATH="([^"]+)."#)
-                .expect("Path deduction regex was invalid.");
-            let captures = regex.captures(line).expect("Installed binary didnt have proper PATH?");
-            let path = captures.get(1).expect("Installed binary didnt have proper PATH?");
+            let regex =
+                regex::Regex::new(r#"^PATH="([^"]+)."#).expect("Path deduction regex was invalid.");
+            let captures = regex
+                .captures(line)
+                .expect("Installed binary didnt have proper PATH?");
+            let path = captures
+                .get(1)
+                .expect("Installed binary didnt have proper PATH?");
 
             return Some(path.as_str().to_owned());
         }
@@ -396,7 +431,7 @@ fn do_install(env_path: Option<PathBuf>, i: OptInstall) -> err::Result<()> {
     let fs = filesystem::OsFileSystem::new();
     let paths = Paths { prefix, bin_dir };
 
-    let db = init_cache(&fs, &paths)?;
+    let mut db = init_cache(&fs, &paths)?;
 
     if i.generate_enable {
         generate_enable_script(&fs, &paths);
@@ -409,19 +444,45 @@ fn do_install(env_path: Option<PathBuf>, i: OptInstall) -> err::Result<()> {
         .as_os_str()
         .to_str()
         .ok_or("unable to generate if folder")?;
-    conan.install(&conan_pkg, &paths, &install_folder, i.settings, i.options)?;
+    conan.install(&conan_pkg, &paths, &install_folder, &i.settings, &i.options)?;
 
     let env_run_path = if_path.join("environment_run.sh.env");
-    let path = extract_path(&fs, env_run_path).expect("environment_run.sh.env did not contain correct PATH? non binary package requested?");
+    let path = extract_path(&fs, env_run_path).expect(
+        "environment_run.sh.env did not contain correct PATH? non binary package requested?",
+    );
 
-    for entry in walkdir::WalkDir::new(path) {
+    for entry in walkdir::WalkDir::new(path).max_depth(1) {
         match entry {
             Ok(entry) => {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
                 let p = entry.path();
                 use std::os::unix::fs::PermissionsExt;
-                if 0o100 & std::fs::metadata(p).expect("unable to extract metadata").permissions().mode() != 0 {
-                    // gene
-                    asdsadsadsa finish this...
+                if 0o100
+                    & std::fs::metadata(p)
+                        .expect("unable to extract metadata")
+                        .permissions()
+                        .mode()
+                    != 0
+                {
+                    crack(
+                        BufReader::new(std::io::stdin().lock()),
+                        &fs,
+                        &CrackRequest {
+                            pkg: conan_pkg.clone(),
+                            bin_name: p
+                                .file_name()
+                                .expect("couldnt extract fname")
+                                .to_str()
+                                .expect("couldnt convert from osstr")
+                                .to_owned(),
+                            settings: i.settings.clone(),
+                            options: i.options.clone(),
+                        },
+                        &paths,
+                        &mut db,
+                    )?;
                 }
             }
             Err(e) => {
@@ -430,9 +491,7 @@ fn do_install(env_path: Option<PathBuf>, i: OptInstall) -> err::Result<()> {
         }
     }
 
-
-
-    //wrap.
+    info("now bumping permissions for all the files.");
     for entry in walkdir::WalkDir::new(paths.storage_dir()) {
         match entry {
             Ok(entry) => {
@@ -475,6 +534,9 @@ fn main() {
                     err::ErrorKind::CrackerStorageDifferentUsername(_, _) => {
                         println!("{}", e);
                     }
+                    err::ErrorKind::ConanInstallFailure(_) => {
+                        println!("{}", e);
+                    }
                     err::ErrorKind::__Nonexhaustive {} => {}
                 }
             }
@@ -485,7 +547,10 @@ fn main() {
 #[cfg(test)]
 mod package_tests {
     use crate::conan_package::ConanPackage;
-    use crate::{crack, err, expand_mode_to_all_users, generate_enable_script, init_cache, Conan, CrackRequest, CrackerDatabase, CrackerDatabaseEntry, Paths, Wrapper, extract_path};
+    use crate::{
+        crack, err, expand_mode_to_all_users, extract_path, generate_enable_script, init_cache,
+        Conan, CrackRequest, CrackerDatabase, CrackerDatabaseEntry, Paths, Wrapper,
+    };
     use std::collections::BTreeMap;
     use std::io::BufReader;
     use std::path::PathBuf;
@@ -668,8 +733,8 @@ binary "${@}""#
                 &ConanPackage::new("abc/321@").unwrap(),
                 &paths,
                 "some_folder",
-                vec![String::from("some_set"), String::from("another_one")],
-                vec![String::from("opt")],
+                &vec![String::from("some_set"), String::from("another_one")],
+                &vec![String::from("opt")],
             );
         let captured_invocations: Vec<String> = receiver.try_iter().collect();
         assert_eq!(captured_invocations, expected_invocations);
@@ -697,14 +762,19 @@ export PATH="some/random/path/bin:$PATH""#
     #[test]
     fn extract_test_path() {
         let mut fs = filesystem::MockFileSystem::new();
-        fs.read_file.return_value(Ok(String::from(r#"
+        fs.read_file.return_value(Ok(String::from(
+            r#"
 abcabcabc
 PATH="wole":"abc"
-        "#).into_bytes()));
+        "#,
+        )
+        .into_bytes()));
 
-        assert_eq!(extract_path(&fs, PathBuf::new()), Some(String::from("wole")));
+        assert_eq!(
+            extract_path(&fs, PathBuf::new()),
+            Some(String::from("wole"))
+        );
     }
-
 
     #[test]
     fn expand_mode_to_all_users_test() {
