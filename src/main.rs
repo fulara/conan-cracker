@@ -20,7 +20,6 @@ whats next:
 
 next revision:
 add ability to install out of index file.
-add ability to provide prefix/suffix for installed wrappers.
  */
 
 fn info(text: &str) {
