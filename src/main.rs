@@ -700,8 +700,8 @@ mod package_tests {
         assert_eq!(
             std::str::from_utf8(&f.1).unwrap(),
             r#"#!/bin/bash
-source some/random/path/bin/activate_run.sh
-source some/random/path/bin/activate.sh
+source some/random/path/.cracker_storage/abc/activate_run.sh
+source some/random/path/.cracker_storage/abc/activate.sh
 binary "${@}""#
         );
 
@@ -716,8 +716,8 @@ binary "${@}""#
         assert_eq!(
             std::str::from_utf8(&f.1).unwrap(),
             r#"#!/bin/bash
-source some/random/path/bin/activate_run.sh
-source some/random/path/bin/activate.sh
+source some/random/path/.cracker_storage/abc/activate_run.sh
+source some/random/path/.cracker_storage/abc/activate.sh
 binary "${@}""#
         );
 
@@ -733,12 +733,12 @@ binary "${@}""#
         let mut expected_invocations = vec![
             String::from(r#""conan" "config" "get" "storage.path""#),
             String::from(
-                r#""conan" "config" "set" "storage.path" "some/random/path/.cracker_storage""#,
+                r#""conan" "config" "set" "storage.path=some/random/path/.cracker_storage""#,
             ),
             String::from(
                 r#""conan" "install" "abc/321@" "-if" "some_folder" "-g" "virtualrunenv" "-g" "virtualenv" "-s" "some_set" "-s" "another_one" "-o" "opt""#,
             ),
-            String::from(r#""conan" "config" "set" "storage.path" "abc""#),
+            String::from(r#""conan" "config" "set" "storage.path=abc""#),
         ];
 
         let (sender, receiver) = std::sync::mpsc::channel();
