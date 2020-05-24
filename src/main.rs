@@ -37,19 +37,26 @@ fn error(text: &str) {
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "cracker")]
-enum Opt {
+struct Opt {
+    #[structopt(subcommand)]
+    command: CrackerCommand,
+}
+
+#[derive(StructOpt, Debug)]
+enum CrackerCommand {
     Install(OptInstall),
+    Import(OptImport),
 }
 
 #[derive(StructOpt, Debug)]
 struct OptInstall {
-    reference: String,
-    #[structopt(long)]
-    wrappers: Vec<String>,
     #[structopt(long)]
     prefix: Option<PathBuf>,
     #[structopt(long)]
     bin_dir: Option<PathBuf>,
+    reference: String,
+    #[structopt(long)]
+    wrappers: Vec<String>,
     #[structopt(long, short)]
     settings: Vec<String>,
     #[structopt(long, short)]
@@ -57,6 +64,9 @@ struct OptInstall {
     #[structopt(long)]
     generate_enable: bool,
 }
+
+#[derive(StructOpt, Debug)]
+struct OptImport {}
 
 struct Paths {
     prefix: PathBuf,
@@ -237,12 +247,12 @@ fn input<R: Read>(mut reader: BufReader<R>, message: &'_ impl std::fmt::Display)
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Wrapper {
     wrapped_bin: String,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct CrackerDatabaseEntry {
     conan_pkg: ConanPackage,
     conan_settings: Vec<String>,
@@ -250,7 +260,7 @@ struct CrackerDatabaseEntry {
     wrappers: Vec<Wrapper>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct CrackerDatabase {
     wrapped: Vec<CrackerDatabaseEntry>,
     storage_owned_by: String,
@@ -279,15 +289,19 @@ impl CrackerDatabase {
     }
 
     fn save(&self, path: PathBuf) -> err::Result<()> {
-        let ser = serde_json::to_string_pretty(self)?;
+        let mut sanitized = self.clone();
+        sanitized.wrapped.retain(|e| !e.wrappers.is_empty());
+
+        let ser = serde_json::to_string_pretty(&sanitized)?;
         use std::fs;
         Ok(File::create(path)?.write_all(ser.as_bytes())?)
     }
 
-    fn wrapped(&self, wrapper_name: &str) -> Option<(&Wrapper)> {
+    fn wrapped(&self, wrapper_name: &str) -> Option<(Wrapper)> {
         self.wrapped
             .iter()
             .find_map(|e| e.wrappers.iter().find(|w| &w.wrapped_bin == wrapper_name))
+            .cloned()
     }
 
     fn register_wrap(&mut self, binary: &str, req: &CrackRequest) {
@@ -311,6 +325,12 @@ impl CrackerDatabase {
         e.wrappers.push(Wrapper {
             wrapped_bin: binary.to_owned(),
         });
+    }
+
+    fn unregister_wrapper(&mut self, wrap: &Wrapper) {
+        for e in self.wrapped.iter_mut() {
+            e.wrappers.retain(|w| w != wrap);
+        }
     }
 }
 
@@ -339,6 +359,7 @@ fn crack<R: Read, Fs: filesystem::FileSystem>(
         }
 
         fs.remove_file(&wrapper_path)?;
+        db.unregister_wrapper(&wrapper);
     }
 
     fs.write_file(
@@ -517,8 +538,8 @@ fn main() {
         .ok()
         .map(|p| PathBuf::from(p));
 
-    match opt {
-        Opt::Install(i) => {
+    match opt.command {
+        CrackerCommand::Install(i) => {
             if let Err(e) = do_install(env_path, i) {
                 match e.0 {
                     err::ErrorKind::Io(_) => {
@@ -541,6 +562,7 @@ fn main() {
                 }
             }
         }
+        CrackerCommand::Import(_) => unimplemented!(),
     }
 }
 
@@ -670,7 +692,7 @@ mod package_tests {
         let result = crack(BufReader::new("".as_bytes()), &fs, &req, &paths, &mut db);
         assert_eq!(
             db.wrapped(&req.bin_name),
-            Some(&Wrapper {
+            Some(Wrapper {
                 wrapped_bin: String::from("binary")
             })
         );
