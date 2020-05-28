@@ -44,6 +44,11 @@ struct Opt {
 #[derive(StructOpt, Debug)]
 enum CrackerCommand {
     Install(OptInstall),
+    /// Same as 'install'
+    Conan(OptInstall),
+
+    Git(OptGit),
+
     Import(OptImport),
 }
 
@@ -60,6 +65,17 @@ struct OptInstall {
     settings: Vec<String>,
     #[structopt(long, short)]
     options: Vec<String>,
+}
+
+#[derive(StructOpt, Debug)]
+struct OptGit {
+    #[structopt(long, env = "CRACKER_STORAGE_DIR")]
+    prefix: PathBuf,
+    #[structopt(long, env = "CRACKER_STORAGE_BIN")]
+    bin_dir: Option<PathBuf>,
+    url: String,
+    #[structopt(long)]
+    wrappers: Vec<String>,
 }
 
 #[derive(StructOpt, Debug)]
@@ -263,10 +279,17 @@ struct Wrapper {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum CrackerDatabaseData {
+    Conan {
+        conan_pkg: ConanPackage,
+        conan_settings: Vec<String>,
+        conan_options: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct CrackerDatabaseEntry {
-    conan_pkg: ConanPackage,
-    conan_settings: Vec<String>,
-    conan_options: Vec<String>,
+    data: CrackerDatabaseData,
     wrappers: Vec<Wrapper>,
 }
 
@@ -314,20 +337,14 @@ impl CrackerDatabase {
             .cloned()
     }
 
-    fn register_wrap(&mut self, binary: &str, req: &CrackRequest) {
-        let e_opt = self.wrapped.iter_mut().find(|entry| {
-            req.pkg == entry.conan_pkg
-                && req.options == entry.conan_options
-                && req.settings == entry.conan_settings
-        });
+    fn register_wrap(&mut self, binary: &str, data: CrackerDatabaseData) {
+        let e_opt = self.wrapped.iter_mut().find(|entry| entry.data == data);
         let e = if let Some(e) = e_opt {
             e
         } else {
             self.wrapped.push(CrackerDatabaseEntry {
-                conan_pkg: req.pkg.clone(),
+                data,
                 wrappers: vec![],
-                conan_settings: req.options.to_vec(),
-                conan_options: req.settings.to_vec(),
             });
             self.wrapped.last_mut().unwrap()
         };
@@ -345,11 +362,10 @@ impl CrackerDatabase {
 }
 
 struct CrackRequest {
-    pkg: ConanPackage,
     bin: PathBuf,
+    pkg_name: String,
 
-    settings: Vec<String>,
-    options: Vec<String>,
+    data: CrackerDatabaseData,
 }
 
 fn crack<R: Read, Fs: filesystem::FileSystem>(
@@ -389,7 +405,7 @@ source {pkg_dir}/activate_run.sh
 source {pkg_dir}/activate.sh
 {bin_name} "${{@}}"
 "#,
-            pkg_dir = paths.generate_install_folder(&request.pkg.name).display(),
+            pkg_dir = paths.generate_install_folder(&request.pkg_name).display(),
             bin_name = request.bin.display()
         )
         .trim()
@@ -403,7 +419,7 @@ source {pkg_dir}/activate.sh
         std::fs::set_permissions(wrapper_path, perms);
     }
 
-    db.register_wrap(&bin_name, request);
+    db.register_wrap(&bin_name, request.data.clone());
 
     Ok(())
 }
@@ -450,13 +466,97 @@ fn extract_path<Fs: filesystem::FileSystem>(fs: &Fs, path: PathBuf) -> Option<St
     None
 }
 
-fn do_install(i: OptInstall) -> err::Result<()> {
+fn preinstall(prefix: PathBuf, bin_dir: Option<PathBuf>) -> err::Result<(Paths, CrackerDatabase)> {
     let fs = filesystem::OsFileSystem::new();
-    let paths = Paths::new(i.prefix, i.bin_dir);
+    let paths = Paths::new(prefix, bin_dir);
 
-    let mut db = init_cache(&fs, &paths)?;
+    let db = init_cache(&fs, &paths)?;
 
     generate_enable_script(&fs, &paths);
+
+    Ok((paths, db))
+}
+
+fn bump_storage_permission(paths: &Paths) -> err::Result<()> {
+    info("now bumping permissions for all the files.");
+    for entry in walkdir::WalkDir::new(paths.storage_dir()) {
+        match entry {
+            Ok(entry) => {
+                let p = entry.path();
+                bump_permissions(p);
+            }
+            Err(e) => {
+                println!("got error while iterating: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn crackem<Fs: filesystem::FileSystem>(
+    fs: &Fs,
+    paths: &Paths,
+    db: &mut CrackerDatabase,
+    root_path: String,
+    pkg_name: &str,
+    wrappers: &[String],
+    data: CrackerDatabaseData,
+) -> err::Result<()> {
+    for entry in walkdir::WalkDir::new(root_path).max_depth(1) {
+        match entry {
+            Ok(entry) => {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let p = entry.path();
+                use std::os::unix::fs::PermissionsExt;
+                if 0o100
+                    & std::fs::metadata(p)
+                        .expect("unable to extract metadata")
+                        .permissions()
+                        .mode()
+                    != 0
+                {
+                    if !wrappers.is_empty()
+                        && !wrappers.contains(&p.file_name().unwrap().to_str().unwrap().to_string())
+                    {
+                        continue;
+                    }
+                    crack(
+                        BufReader::new(std::io::stdin().lock()),
+                        fs,
+                        &CrackRequest {
+                            pkg_name: pkg_name.to_owned(),
+                            bin: std::fs::canonicalize(p.to_path_buf()).unwrap(),
+                            data: data.clone(),
+                        },
+                        &paths,
+                        db,
+                    )?;
+                }
+            }
+            Err(e) => {
+                println!("got error while iterating: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn do_git_install(i: OptGit) -> err::Result<()> {
+    let fs = filesystem::OsFileSystem::new();
+    let (paths, mut db) = preinstall(i.prefix, i.bin_dir)?;
+
+    bump_storage_permission(&paths);
+    db.save(paths.db_path());
+    Ok(())
+}
+
+fn do_install(i: OptInstall) -> err::Result<()> {
+    let fs = filesystem::OsFileSystem::new();
+    let (paths, mut db) = preinstall(i.prefix, i.bin_dir)?;
 
     let conan = Conan::new(execute)?;
     let conan_pkg = ConanPackage::new(&i.reference)?;
@@ -472,61 +572,21 @@ fn do_install(i: OptInstall) -> err::Result<()> {
         "environment_run.sh.env did not contain correct PATH? non binary package requested?",
     );
 
-    for entry in walkdir::WalkDir::new(path).max_depth(1) {
-        match entry {
-            Ok(entry) => {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let p = entry.path();
-                use std::os::unix::fs::PermissionsExt;
-                if 0o100
-                    & std::fs::metadata(p)
-                        .expect("unable to extract metadata")
-                        .permissions()
-                        .mode()
-                    != 0
-                {
-                    if !i.wrappers.is_empty()
-                        && !i
-                            .wrappers
-                            .contains(&p.file_name().unwrap().to_str().unwrap().to_string())
-                    {
-                        continue;
-                    }
-                    crack(
-                        BufReader::new(std::io::stdin().lock()),
-                        &fs,
-                        &CrackRequest {
-                            pkg: conan_pkg.clone(),
-                            bin: std::fs::canonicalize(p.to_path_buf()).unwrap(),
-                            settings: i.settings.clone(),
-                            options: i.options.clone(),
-                        },
-                        &paths,
-                        &mut db,
-                    )?;
-                }
-            }
-            Err(e) => {
-                println!("got error while iterating: {}", e);
-            }
-        }
-    }
+    crackem(
+        &fs,
+        &paths,
+        &mut db,
+        path,
+        &conan_pkg.name,
+        &i.wrappers,
+        CrackerDatabaseData::Conan {
+            conan_pkg: conan_pkg.clone(),
+            conan_settings: i.settings.clone(),
+            conan_options: i.options.clone(),
+        },
+    )?;
 
-    info("now bumping permissions for all the files.");
-    for entry in walkdir::WalkDir::new(paths.storage_dir()) {
-        match entry {
-            Ok(entry) => {
-                let p = entry.path();
-                bump_permissions(p);
-            }
-            Err(e) => {
-                println!("got error while iterating: {}", e);
-            }
-        }
-    }
-
+    bump_storage_permission(&paths);
     db.save(paths.db_path());
 
     Ok(())
@@ -537,21 +597,29 @@ fn do_import(i: OptImport) -> err::Result<()> {
     let db = CrackerDatabase::load(&fs, i.db_path)?;
 
     for wrapped in db.wrapped {
-        info(&format!("now installing: {}", wrapped.conan_pkg.full()));
-        let install = OptInstall {
-            prefix: i.prefix.clone(),
-            bin_dir: i.bin_dir.clone(),
-            options: wrapped.conan_options,
-            settings: wrapped.conan_settings,
-            wrappers: wrapped
-                .wrappers
-                .iter()
-                .map(|w| w.wrapped_bin.clone())
-                .collect(),
-            reference: wrapped.conan_pkg.full(),
-        };
+        match wrapped.data {
+            CrackerDatabaseData::Conan {
+                conan_pkg,
+                conan_options,
+                conan_settings,
+            } => {
+                info(&format!("now installing: {}", conan_pkg.full()));
+                let install = OptInstall {
+                    prefix: i.prefix.clone(),
+                    bin_dir: i.bin_dir.clone(),
+                    options: conan_options,
+                    settings: conan_settings,
+                    wrappers: wrapped
+                        .wrappers
+                        .iter()
+                        .map(|w| w.wrapped_bin.clone())
+                        .collect(),
+                    reference: conan_pkg.full(),
+                };
 
-        do_install(install)?;
+                do_install(install)?;
+            }
+        }
     }
 
     Ok(())
@@ -562,7 +630,7 @@ fn main() {
     println!("{:#?}", opt);
 
     match opt.command {
-        CrackerCommand::Install(i) => {
+        CrackerCommand::Install(i) | CrackerCommand::Conan(i) => {
             if let Err(e) = do_install(i) {
                 match e.0 {
                     err::ErrorKind::Io(_) => {
@@ -588,6 +656,9 @@ fn main() {
         CrackerCommand::Import(i) => {
             do_import(i);
         }
+        CrackerCommand::Git(i) => {
+            do_git_install(i);
+        }
     }
 }
 
@@ -596,7 +667,8 @@ mod package_tests {
     use crate::conan_package::ConanPackage;
     use crate::{
         crack, err, expand_mode_to_all_users, extract_path, generate_enable_script, init_cache,
-        Conan, CrackRequest, CrackerDatabase, CrackerDatabaseEntry, Paths, Wrapper,
+        Conan, CrackRequest, CrackerDatabase, CrackerDatabaseData, CrackerDatabaseEntry, Paths,
+        Wrapper,
     };
     use std::collections::BTreeMap;
     use std::io::BufReader;
@@ -698,9 +770,12 @@ mod package_tests {
     fn crack_tests() {
         let req = CrackRequest {
             bin: PathBuf::from("binary"),
-            pkg: ConanPackage::new("abc/321@a/b").unwrap(),
-            settings: vec![],
-            options: vec![],
+            pkg_name: String::from("abc"),
+            data: CrackerDatabaseData::Conan {
+                conan_pkg: ConanPackage::new("abc/321@a/b").unwrap(),
+                conan_settings: vec![],
+                conan_options: vec![],
+            },
         };
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
