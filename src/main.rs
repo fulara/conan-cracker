@@ -13,6 +13,7 @@ mod conan_package;
 mod err;
 
 use crate::conan_package::*;
+use filesystem::FileSystem;
 use std::fs::File;
 use walkdir::{DirEntry, Error};
 /*
@@ -91,15 +92,43 @@ struct OptImport {
 struct Paths {
     prefix: PathBuf,
     bin_dir: PathBuf,
+    install_type: InstallationType,
+    pkg_name: String,
+}
+
+enum InstallationType {
+    Conan,
+    Git,
+}
+
+impl InstallationType {
+    fn format(&self) -> &str {
+        match *self {
+            InstallationType::Conan => "conan",
+            InstallationType::Git => "git",
+        }
+    }
 }
 
 impl Paths {
-    pub fn new(prefix: PathBuf, bin_dir: Option<PathBuf>) -> Self {
+    pub fn new(
+        prefix: PathBuf,
+        bin_dir: Option<PathBuf>,
+        install_type: InstallationType,
+        pkg_name: &str,
+    ) -> Self {
         Self {
             bin_dir: bin_dir.unwrap_or(prefix.join("bin")),
             prefix,
+            install_type,
+            pkg_name: pkg_name.to_owned(),
         }
     }
+
+    fn bin_dir(&self) -> PathBuf {
+        self.bin_dir.clone()
+    }
+
     fn storage_dir(&self) -> PathBuf {
         self.prefix.join(".cracker_storage")
     }
@@ -108,10 +137,11 @@ impl Paths {
         self.prefix.join(".cracker_index")
     }
 
-    fn generate_install_folder(&self, pkg_name: &str) -> PathBuf {
+    fn install_folder(&self) -> PathBuf {
         //so.. it would be better to actully randomize this - but for now its okayish.
         //but it doesnt handle at all installing mulple version of the packages.
-        self.storage_dir().join(pkg_name)
+        self.storage_dir()
+            .join(format!("{}_{}", self.install_type.format(), self.pkg_name))
     }
 }
 fn execute(mut c: Command) -> std::io::Result<std::process::Output> {
@@ -291,6 +321,7 @@ enum CrackerDatabaseData {
 struct CrackerDatabaseEntry {
     data: CrackerDatabaseData,
     wrappers: Vec<Wrapper>,
+    install_folder: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -337,13 +368,23 @@ impl CrackerDatabase {
             .cloned()
     }
 
-    fn register_wrap(&mut self, binary: &str, data: CrackerDatabaseData) {
+    fn wrappers(&self, install_folder: &str) -> Vec<Wrapper> {
+        self.wrapped
+            .iter()
+            .filter(|e| e.install_folder == install_folder)
+            .map(|e| e.wrappers.clone())
+            .next()
+            .unwrap_or_default()
+    }
+
+    fn register_wrap(&mut self, binary: &str, pkg_dir: &str, data: CrackerDatabaseData) {
         let e_opt = self.wrapped.iter_mut().find(|entry| entry.data == data);
         let e = if let Some(e) = e_opt {
             e
         } else {
             self.wrapped.push(CrackerDatabaseEntry {
                 data,
+                install_folder: pkg_dir.to_owned(),
                 wrappers: vec![],
             });
             self.wrapped.last_mut().unwrap()
@@ -358,6 +399,10 @@ impl CrackerDatabase {
         for e in self.wrapped.iter_mut() {
             e.wrappers.retain(|w| w != wrap);
         }
+    }
+
+    fn unregister_pkg(&mut self, install_folder: &str) {
+        self.wrapped.retain(|f| f.install_folder != install_folder);
     }
 }
 
@@ -405,7 +450,7 @@ source {pkg_dir}/activate_run.sh
 source {pkg_dir}/activate.sh
 {bin_name} "${{@}}"
 "#,
-            pkg_dir = paths.generate_install_folder(&request.pkg_name).display(),
+            pkg_dir = paths.install_folder().display(),
             bin_name = request.bin.display()
         )
         .trim()
@@ -419,7 +464,11 @@ source {pkg_dir}/activate.sh
         std::fs::set_permissions(wrapper_path, perms);
     }
 
-    db.register_wrap(&bin_name, request.data.clone());
+    db.register_wrap(
+        &bin_name,
+        paths.install_folder().to_str().unwrap(),
+        request.data.clone(),
+    );
 
     Ok(())
 }
@@ -466,9 +515,8 @@ fn extract_path<Fs: filesystem::FileSystem>(fs: &Fs, path: PathBuf) -> Option<St
     None
 }
 
-fn preinstall(prefix: PathBuf, bin_dir: Option<PathBuf>) -> err::Result<(Paths, CrackerDatabase)> {
+fn preinstall(paths: Paths) -> err::Result<(Paths, CrackerDatabase)> {
     let fs = filesystem::OsFileSystem::new();
-    let paths = Paths::new(prefix, bin_dir);
 
     let db = init_cache(&fs, &paths)?;
 
@@ -492,6 +540,38 @@ fn bump_storage_permission(paths: &Paths) -> err::Result<()> {
     }
 
     Ok(())
+}
+
+fn make_sure_if_empty<Fs: filesystem::FileSystem>(
+    fs: &Fs,
+    pkg_name: &str,
+    paths: &Paths,
+    db: &mut CrackerDatabase,
+) -> bool {
+    let if_path = paths.install_folder();
+    if fs.is_dir(&if_path) {
+        let wrappers = db.wrappers(if_path.to_str().unwrap());
+        let bins: Vec<String> = wrappers.iter().map(|w| w.wrapped_bin.clone()).collect();
+        if input(BufReader::new(std::io::stdin().lock()), &format!("Package: {} already installed wraps: [{}], to proceed that package has to be removed, remove?", pkg_name, bins.join(", "))) {
+            if let Err(e) = fs.remove_dir_all(&if_path) {
+                warn(&format!("Failure while removing if: {}, continued. {:?}", if_path.display(), e));
+            }
+            for bin in bins {
+                if let Err(_) = fs.remove_file(paths.bin_dir().join(&bin)) {
+                    warn(&format!("Failure while removing wrapper: {}, continued.", bin));
+                }
+            }
+
+            db.unregister_pkg(if_path.to_str().unwrap());
+            db.save(paths.db_path());
+            info("ok removed.");
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 fn crackem<Fs: filesystem::FileSystem>(
@@ -547,7 +627,8 @@ fn crackem<Fs: filesystem::FileSystem>(
 
 fn do_git_install(i: OptGit) -> err::Result<()> {
     let fs = filesystem::OsFileSystem::new();
-    let (paths, mut db) = preinstall(i.prefix, i.bin_dir)?;
+    let paths = Paths::new(i.prefix, i.bin_dir, InstallationType::Git, "unknown_yet");
+    let (paths, mut db) = preinstall(paths)?;
 
     bump_storage_permission(&paths);
     db.save(paths.db_path());
@@ -556,11 +637,23 @@ fn do_git_install(i: OptGit) -> err::Result<()> {
 
 fn do_install(i: OptInstall) -> err::Result<()> {
     let fs = filesystem::OsFileSystem::new();
-    let (paths, mut db) = preinstall(i.prefix, i.bin_dir)?;
+    let conan_pkg = ConanPackage::new(&i.reference)?;
+    let paths = Paths::new(
+        i.prefix,
+        i.bin_dir,
+        InstallationType::Conan,
+        &conan_pkg.name,
+    );
+    let (paths, mut db) = preinstall(paths)?;
 
     let conan = Conan::new(execute)?;
-    let conan_pkg = ConanPackage::new(&i.reference)?;
-    let if_path = paths.generate_install_folder(&conan_pkg.name);
+
+    let if_path = paths.install_folder();
+    if !make_sure_if_empty(&fs, &conan_pkg.name, &paths, &mut db) {
+        warn("Unable to install package.");
+        return Ok(());
+    }
+
     let install_folder = if_path
         .as_os_str()
         .to_str()
@@ -667,8 +760,8 @@ mod package_tests {
     use crate::conan_package::ConanPackage;
     use crate::{
         crack, err, expand_mode_to_all_users, extract_path, generate_enable_script, init_cache,
-        Conan, CrackRequest, CrackerDatabase, CrackerDatabaseData, CrackerDatabaseEntry, Paths,
-        Wrapper,
+        Conan, CrackRequest, CrackerDatabase, CrackerDatabaseData, CrackerDatabaseEntry,
+        InstallationType, Paths, Wrapper,
     };
     use std::collections::BTreeMap;
     use std::io::BufReader;
@@ -697,6 +790,8 @@ mod package_tests {
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
             bin_dir: PathBuf::from("some/random/path/bin"),
+            install_type: InstallationType::Conan,
+            pkg_name: "abc".to_owned(),
         };
 
         let fs = filesystem::MockFileSystem::new();
@@ -718,6 +813,8 @@ mod package_tests {
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
             bin_dir: PathBuf::from("some/random/path/bin"),
+            install_type: InstallationType::Conan,
+            pkg_name: "abc".to_owned(),
         };
 
         let fs = filesystem::MockFileSystem::new();
@@ -745,6 +842,8 @@ mod package_tests {
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
             bin_dir: PathBuf::from("some/random/path/bin"),
+            install_type: InstallationType::Conan,
+            pkg_name: "abc".to_owned(),
         };
 
         let fs = filesystem::MockFileSystem::new();
@@ -780,6 +879,8 @@ mod package_tests {
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
             bin_dir: PathBuf::from("some/random/path/bin"),
+            install_type: InstallationType::Conan,
+            pkg_name: "abc".to_owned(),
         };
 
         let fs = filesystem::MockFileSystem::new();
@@ -803,8 +904,8 @@ mod package_tests {
         assert_eq!(
             std::str::from_utf8(&f.1).unwrap(),
             r#"#!/bin/bash
-source some/random/path/.cracker_storage/abc/activate_run.sh
-source some/random/path/.cracker_storage/abc/activate.sh
+source some/random/path/.cracker_storage/conan_abc/activate_run.sh
+source some/random/path/.cracker_storage/conan_abc/activate.sh
 binary "${@}""#
         );
 
@@ -819,8 +920,8 @@ binary "${@}""#
         assert_eq!(
             std::str::from_utf8(&f.1).unwrap(),
             r#"#!/bin/bash
-source some/random/path/.cracker_storage/abc/activate_run.sh
-source some/random/path/.cracker_storage/abc/activate.sh
+source some/random/path/.cracker_storage/conan_abc/activate_run.sh
+source some/random/path/.cracker_storage/conan_abc/activate.sh
 binary "${@}""#
         );
 
@@ -849,6 +950,8 @@ binary "${@}""#
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
             bin_dir: PathBuf::from("some/random/path/bin"),
+            install_type: InstallationType::Conan,
+            pkg_name: "abc".to_owned(),
         };
 
         Conan::new(|c| assert_command_generate_output(c, sender.clone(), "abc"))
@@ -869,6 +972,8 @@ binary "${@}""#
         let paths = Paths {
             prefix: PathBuf::from("some/random/path"),
             bin_dir: PathBuf::from("some/random/path/bin"),
+            install_type: InstallationType::Conan,
+            pkg_name: "abc".to_owned(),
         };
         let mut fs = filesystem::MockFileSystem::new();
         generate_enable_script(&mut fs, &paths).unwrap();
