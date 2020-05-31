@@ -15,5 +15,9 @@ error_chain! {
             description("Cracker storage owned by different user")
             display("Cracker storage owned by: '{}' while you are: '{}'", owned_by, called_by)
         }
+
+        GitUnableToExtractProjectName(url : String) {
+            display("unable to extract project name from your url: {}", url)
+        }
     }
 }

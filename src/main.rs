@@ -77,6 +77,9 @@ struct OptGit {
     url: String,
     #[structopt(long)]
     wrappers: Vec<String>,
+
+    #[structopt(long, default_value = ".")]
+    search_paths: Vec<String>,
 }
 
 #[derive(StructOpt, Debug)]
@@ -315,6 +318,12 @@ enum CrackerDatabaseData {
         conan_settings: Vec<String>,
         conan_options: Vec<String>,
     },
+    Git {
+        pkg_name: String,
+        url: String,
+        label: String,
+        search_paths: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -419,6 +428,7 @@ fn crack<R: Read, Fs: filesystem::FileSystem>(
     request: &CrackRequest,
     paths: &Paths,
     db: &mut CrackerDatabase,
+    use_conan_wrappers: bool,
 ) -> std::io::Result<()> {
     let bin_name = request
         .bin
@@ -441,8 +451,7 @@ fn crack<R: Read, Fs: filesystem::FileSystem>(
         db.unregister_wrapper(&wrapper);
     }
 
-    fs.write_file(
-        &wrapper_path,
+    let wrapper_contents = if use_conan_wrappers {
         format!(
             r#"
 #!/bin/bash
@@ -453,9 +462,17 @@ source {pkg_dir}/activate.sh
             pkg_dir = paths.install_folder().display(),
             bin_name = request.bin.display()
         )
-        .trim()
-        .to_owned(),
-    )?;
+    } else {
+        format!(
+            r#"
+#!/bin/bash
+{bin_name} "${{@}}"
+"#,
+            bin_name = request.bin.display()
+        )
+    };
+
+    fs.write_file(&wrapper_path, wrapper_contents.trim().to_owned())?;
     if let Ok(metadata) = std::fs::metadata(&wrapper_path) {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = metadata.permissions();
@@ -582,6 +599,7 @@ fn crackem<Fs: filesystem::FileSystem>(
     pkg_name: &str,
     wrappers: &[String],
     data: CrackerDatabaseData,
+    use_conan_wrappers: bool,
 ) -> err::Result<()> {
     for entry in walkdir::WalkDir::new(root_path).max_depth(1) {
         match entry {
@@ -613,6 +631,7 @@ fn crackem<Fs: filesystem::FileSystem>(
                         },
                         &paths,
                         db,
+                        use_conan_wrappers,
                     )?;
                 }
             }
@@ -625,10 +644,66 @@ fn crackem<Fs: filesystem::FileSystem>(
     Ok(())
 }
 
+fn extract_git_repo_name(url: &str) -> err::Result<String> {
+    let regex = regex::Regex::new(r"^.*/(.*)\.git$").expect("Invalid git regex.");
+
+    if !regex.is_match(url) {
+        return Err(err::ErrorKind::GitUnableToExtractProjectName(url.to_owned()).into());
+    }
+
+    Ok(regex
+        .captures(url)
+        .unwrap()
+        .get(1)
+        .unwrap()
+        .as_str()
+        .to_owned())
+}
+
 fn do_git_install(i: OptGit) -> err::Result<()> {
     let fs = filesystem::OsFileSystem::new();
-    let paths = Paths::new(i.prefix, i.bin_dir, InstallationType::Git, "unknown_yet");
+    let pkg_name = extract_git_repo_name(&i.url)?;
+    let paths = Paths::new(i.prefix, i.bin_dir, InstallationType::Git, &pkg_name);
     let (paths, mut db) = preinstall(paths)?;
+
+    if !make_sure_if_empty(&fs, &pkg_name, &paths, &mut db) {
+        warn("Unable to install package.");
+        return Ok(());
+    }
+
+    let mut c = Command::new("git");
+    c.args(&[
+        "clone",
+        &i.url,
+        "--depth",
+        "1",
+        paths.install_folder().as_os_str().to_str().unwrap(),
+    ]);
+    execute(c);
+
+    for path in i.search_paths.iter() {
+        let path = paths
+            .install_folder()
+            .join(path)
+            .to_str()
+            .unwrap()
+            .to_string();
+        crackem(
+            &fs,
+            &paths,
+            &mut db,
+            path.to_string(),
+            &pkg_name,
+            &i.wrappers,
+            CrackerDatabaseData::Git {
+                pkg_name: pkg_name.clone(),
+                url: i.url.clone(),
+                label: "unimplemented".to_string(),
+                search_paths: i.search_paths.clone(),
+            },
+            false,
+        )?;
+    }
 
     bump_storage_permission(&paths);
     db.save(paths.db_path());
@@ -677,6 +752,7 @@ fn do_install(i: OptInstall) -> err::Result<()> {
             conan_settings: i.settings.clone(),
             conan_options: i.options.clone(),
         },
+        true,
     )?;
 
     bump_storage_permission(&paths);
@@ -690,6 +766,11 @@ fn do_import(i: OptImport) -> err::Result<()> {
     let db = CrackerDatabase::load(&fs, i.db_path)?;
 
     for wrapped in db.wrapped {
+        let wrappers = wrapped
+            .wrappers
+            .iter()
+            .map(|w| w.wrapped_bin.clone())
+            .collect();
         match wrapped.data {
             CrackerDatabaseData::Conan {
                 conan_pkg,
@@ -702,15 +783,29 @@ fn do_import(i: OptImport) -> err::Result<()> {
                     bin_dir: i.bin_dir.clone(),
                     options: conan_options,
                     settings: conan_settings,
-                    wrappers: wrapped
-                        .wrappers
-                        .iter()
-                        .map(|w| w.wrapped_bin.clone())
-                        .collect(),
+                    wrappers,
                     reference: conan_pkg.full(),
                 };
 
                 do_install(install)?;
+            }
+            CrackerDatabaseData::Git {
+                pkg_name,
+                url,
+                label,
+                search_paths,
+            } => {
+                info(&format!("now installing: {}", url));
+
+                let install = OptGit {
+                    url,
+                    search_paths,
+                    wrappers,
+                    prefix: i.prefix.clone(),
+                    bin_dir: i.bin_dir.clone(),
+                };
+
+                do_git_install(install)?;
             }
         }
     }
@@ -743,6 +838,9 @@ fn main() {
                         println!("{}", e);
                     }
                     err::ErrorKind::__Nonexhaustive {} => {}
+                    err::ErrorKind::GitUnableToExtractProjectName(_) => {
+                        println!("{}", e);
+                    }
                 }
             }
         }
@@ -759,9 +857,9 @@ fn main() {
 mod package_tests {
     use crate::conan_package::ConanPackage;
     use crate::{
-        crack, err, expand_mode_to_all_users, extract_path, generate_enable_script, init_cache,
-        Conan, CrackRequest, CrackerDatabase, CrackerDatabaseData, CrackerDatabaseEntry,
-        InstallationType, Paths, Wrapper,
+        crack, err, expand_mode_to_all_users, extract_git_repo_name, extract_path,
+        generate_enable_script, init_cache, Conan, CrackRequest, CrackerDatabase,
+        CrackerDatabaseData, CrackerDatabaseEntry, InstallationType, Paths, Wrapper,
     };
     use std::collections::BTreeMap;
     use std::io::BufReader;
@@ -892,7 +990,14 @@ mod package_tests {
         assert!(db
             .wrapped(req.bin.file_name().unwrap().to_str().unwrap())
             .is_none());
-        let result = crack(BufReader::new("".as_bytes()), &fs, &req, &paths, &mut db);
+        let result = crack(
+            BufReader::new("".as_bytes()),
+            &fs,
+            &req,
+            &paths,
+            &mut db,
+            true,
+        );
         assert_eq!(
             db.wrapped(req.bin.file_name().unwrap().to_str().unwrap()),
             Some(Wrapper {
@@ -910,7 +1015,14 @@ binary "${@}""#
         );
 
         let fs = filesystem::MockFileSystem::new();
-        let result = crack(BufReader::new("y".as_bytes()), &fs, &req, &paths, &mut db);
+        let result = crack(
+            BufReader::new("y".as_bytes()),
+            &fs,
+            &req,
+            &paths,
+            &mut db,
+            true,
+        );
         assert_eq!(
             fs.remove_file.calls()[0],
             PathBuf::from("some/random/path/bin/binary")
@@ -927,7 +1039,15 @@ binary "${@}""#
 
         // binary wrapped already - user does not want to override.
         let fs = filesystem::MockFileSystem::new();
-        crack(BufReader::new("n".as_bytes()), &fs, &req, &paths, &mut db).unwrap();
+        crack(
+            BufReader::new("n".as_bytes()),
+            &fs,
+            &req,
+            &paths,
+            &mut db,
+            true,
+        )
+        .unwrap();
         assert!(fs.remove_file.calls().is_empty());
         assert!(fs.write_file.calls().is_empty());
     }
@@ -1012,5 +1132,13 @@ PATH="wole":"abc"
         assert_eq!(expand_mode_to_all_users(0o644u32), 0o666);
         assert_eq!(expand_mode_to_all_users(0o713u32), 0o777);
         assert_eq!(expand_mode_to_all_users(0o134u32), 0o135);
+    }
+
+    #[test]
+    fn extract_git_url_project_name() {
+        assert_eq!(
+            extract_git_repo_name("https://github.com/fulara/conan-cracker.git").unwrap(),
+            String::from("conan-cracker")
+        );
     }
 }
