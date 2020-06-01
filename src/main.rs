@@ -133,7 +133,7 @@ impl Paths {
     }
 
     fn storage_dir(&self) -> PathBuf {
-        self.prefix.join(".cracker_storage")
+        self.prefix.join(".cracker_storage").join(".conan")
     }
 
     fn db_path(&self) -> PathBuf {
