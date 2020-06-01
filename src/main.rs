@@ -133,7 +133,7 @@ impl Paths {
     }
 
     fn storage_dir(&self) -> PathBuf {
-        self.prefix.join(".cracker_storage").join(".conan")
+        self.prefix.join(".cracker_storage")
     }
 
     fn db_path(&self) -> PathBuf {
@@ -217,7 +217,7 @@ impl<Executor: Clone + Fn(Command) -> std::io::Result<std::process::Output>> Con
         options: &[String],
     ) -> err::Result<()> {
         info(&format!("Installing package: {}", conan_pkg.full()));
-        let guard = ConanStorageGuard::new(self.executor.clone(), &paths.storage_dir());
+        let guard = ConanStorageGuard::new(self.executor.clone(), &paths.storage_dir().join(".conan"));
         let settings: Vec<&str> = settings
             .iter()
             .flat_map(|s| vec!["-s", s.as_ref()])
