@@ -18,9 +18,9 @@ use std::fs::File;
 use walkdir::{DirEntry, Error};
 /*
 whats next:
+stream output while invoking commands.
+handle errors from git.
 
-next revision:
-add ability to install out of index file.
  */
 
 fn info(text: &str) {
